@@ -70,8 +70,21 @@ Robot Runtime ← NEXT
 ```text
 docs/
 ├── progress/      # 各Phaseの進捗・実機確認結果
-└── decisions/     # Architecture Decision Records (ADR)
+├── decisions/     # Architecture Decision Records (ADR)
+└── specs/         # 実装仕様
 ```
+
+### Documentation Update Rules
+
+ドキュメントは役割を分けて更新する。
+
+- `docs/decisions/`: 今後の設計・実装に影響する重要な技術判断が確定した時点でADRを追加・更新する
+- `docs/specs/`: 実装対象の設計・要求・Acceptance Criteriaが固まった時点で追加・更新する
+- `docs/progress/`: 実装、テスト、実機確認などの結果として「実際にできたこと」が増えた節目で更新する
+
+原則として `specs` は「これから作るもの」、`progress` は「実際にできたもの」、`decisions` は「なぜそうしたか」を記録する。
+
+予定や未検証の内容を `progress` の完了実績として扱わない。
 
 AI Agent向けの共通開発ルールは `AGENTS.md` を参照。
 
