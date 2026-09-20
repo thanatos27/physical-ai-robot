@@ -56,7 +56,7 @@ Raspberry Pi向けのコマンドやコードは、可能な限りそのまま�
 
 現在の実機環境については以下を参照。
 
-`docs/progress/phase-0.5.md`
+`docs/progress/phase-0.5-progress.md`
 
 ### 4. Keep Architecture Boundaries
 
@@ -153,7 +153,7 @@ Log
 
 詳細は以下を参照。
 
-`docs/progress/phase-0.5.md`
+`docs/progress/phase-0.5-progress.md`
 
 ## Working With Other Agents
 
