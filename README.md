@@ -54,7 +54,7 @@ Robot Runtime ← NEXT
 
 詳細な進捗：
 
-`docs/progress/phase-0.5.md`
+`docs/progress/phase-0.5-progress.md`
 
 ## Development Principles
 
