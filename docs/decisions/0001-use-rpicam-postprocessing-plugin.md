@@ -10,7 +10,7 @@ Phase 0.5では、Raspberry Pi 5 + AI HAT+ 2 + Camera Module 3 Wideによる物�
 
 以下のパイプラインは実機で動作確認済み。
 
-```text id="3rqgv5"
+```text
 Camera Module 3 Wide
         ↓
 rpicam-apps
@@ -30,7 +30,7 @@ GStreamerのPad ProbeからHailo Metadataを取得する方式を検討した。
 
 Hailo Python APIには以下が存在する。
 
-```text id="wkk5a4"
+```text
 HailoROI
 HailoDetection
 get_roi_from_buffer
@@ -51,7 +51,7 @@ gst-inspect-1.0 libcamerasrc
 
 `rpicam-apps` のPost Processing Metadataを調査した結果、Detection結果が以下のMetadata Tagに格納されていることを確認した。
 
-```text id="et3yhg"
+```text
 object_detect.results
 ```
 
@@ -69,7 +69,7 @@ Phase 0.5では **rpicam-apps Post Processing Plugin方式を採用する**。
 
 パイプラインは以下とする。
 
-```text id="e1rgzr"
+```text
 Camera
   ↓
 rpicam-apps
@@ -103,7 +103,7 @@ Robot Runtime
 
 Robot RuntimeはHailo APIや `rpicam-apps` 内部構造を直接扱う必要がなくなる。
 
-```text id="8tw88q"
+```text
 Hailo / rpicam-apps
         ↓
      JSON Lines
@@ -125,7 +125,7 @@ Hailo / rpicam-apps
 
 以下の構成で実機動作を確認済み。
 
-```text id="7z2qvu"
+```text
 Camera Module 3 Wide
         ↓
 rpicam-apps
