@@ -705,6 +705,28 @@ RobotLoopRecord
 
 「何も検出されなかった」という Observation も Robot Data として扱う。
 
+#### object_detect.results が存在しないフレーム
+
+実機確認により、`hailo_yolo_inference` は Detection 0件のフレームで `object_detect.results` を設定しない場合があることを確認した。
+
+このため Phase 0.5 では `detection_logger` を Edge AI Pipeline と Robot Runtime の正規化境界として扱い、`object_detect.results` を取得できないフレームも以下の JSONL として Runtime へ出力する。
+
+```json
+{"timestamp":123456789,"detections":[]}
+```
+
+Phase 0.5 では `detection_logger` から見て、以下を区別しない。
+
+- 正常に推論した結果、Detection 0件
+- 推論処理が成立していない
+- 推論結果を取得できなかった
+
+これらは Runtime 入力上すべて `detections: []` へ正規化し、Runtime は正常な DetectionEvent / Observation として `NO_PERSON` へ処理する。
+
+これは Phase 0.5 で Observe → Reason → Action → Log の基本ループ成立を優先するための限定的な設計判断であり、将来も推論失敗を Detection 0件として扱うことを意味しない。
+
+自律走行やセンサー健全性監視等で「正常な0件」と「観測失敗」の区別が必要になった時点で、推論状態を表すメタデータや `inference_status` 等の導入を別途検討する。
+
 ### Action失敗
 
 Executor が期待される失敗として、
