@@ -23,10 +23,13 @@ public:
     {
         std::vector<Detection> detections;
 
+        // ADR 0008: object_detect.results を取得できないフレーム
+        // (hailo_yolo_inference が Detection 0件で設定しない場合を含む)も、
+        // 空の detections として出力する。Runtime 入力を正規化する境界。
         if (request->post_process_metadata.Get(
                 "object_detect.results", detections) != 0)
         {
-            return false;
+            detections.clear();
         }
 
         // Unix time (milliseconds)
