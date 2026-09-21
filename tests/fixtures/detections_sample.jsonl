@@ -1,0 +1,7 @@
+{"timestamp":1789762879207,"detections":[{"class":"person","category":1,"confidence":0.901203,"bbox":{"x":3,"y":2,"width":1242,"height":1044}},{"class":"clock","category":75,"confidence":0.435167,"bbox":{"x":940,"y":502,"width":235,"height":373}}]}
+{"timestamp":1789762879240,"detections":[{"class":"clock","category":75,"confidence":0.512340,"bbox":{"x":940,"y":502,"width":235,"height":373}}]}
+this is not json (e.g. rpicam-apps diagnostic output)
+
+{"timestamp":1789762879273,"detections":[]}
+{"foo":"bar"}
+{"timestamp":1789762879307,"detections":[{"class":"person","category":1,"confidence":0.850000,"bbox":{"x":10,"y":20,"width":300,"height":600}}]}
