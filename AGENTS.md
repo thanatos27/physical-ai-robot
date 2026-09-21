@@ -24,6 +24,22 @@ GitHubリポジトリをプロジェクトのSource of Truthとする。
 
 AI Agentは既存ドキュメントとコードを確認してから変更を行うこと。
 
+## Development Workflow
+
+開発プロセス、役割分担、Acceptance Criteria、実機確認、Phase完了条件については以下を参照する。
+
+`docs/development/workflow.md`
+
+AI Agentは実装開始前に、対象Phase・機能のSpecification、ADR、Acceptance Criteriaを確認する。
+
+特に以下を守る。
+
+- Acceptance Criteriaを実装目標として扱う
+- Automated Test成功とReal-device Verification成功を区別する
+- 仕様だけでは決められない設計判断を独自に確定しない
+- 新しい設計判断が必要な場合は実装を拡大せず、設計側へ戻す
+- 未確認事項を推測でPassまたは完了扱いにしない
+
 ## Development Principles
 
 ### 1. Preserve Verified Configurations
@@ -32,16 +48,11 @@ AI Agentは既存ドキュメントとコードを確認してから変更を行
 
 既存の正常動作している構成を、明確な理由なく置き換えない。
 
-変更が必要な場合は以下を明確にする。
-
-* 変更理由
-* 期待するメリット
-* 既存構成への影響
-* 検証方法
+変更が必要な場合は、変更理由、期待するメリット、既存構成への影響、検証方法を明確にする。
 
 ### 2. Prefer Evidence Over Assumptions
 
-ハードウェア・OS・ドライバ・ライブラリ等について、推測より以下を優先する。
+ハードウェア・OS・ドライバ・ライブラリ等について、以下の順に優先する。
 
 1. 現在の実機環境
 2. 実機で確認した結果
@@ -74,40 +85,20 @@ Log
 
 将来センサー、モーター、SLAM、AI Agent等が追加されても、この境界を不用意に結合しない。
 
-### 5. Record Technical Decisions
+## Documentation
 
-重要なアーキテクチャ変更や技術選定はADR（Architecture Decision Record）として記録する。
+ドキュメントの役割と更新タイミングは `docs/development/workflow.md` に従う。
 
-保存先：
-
-```text
-docs/decisions/
-```
-
-特に以下の場合はADRを検討する。
-
-* 主要ライブラリ・フレームワークの選択
-* Runtime構成の変更
-* データフォーマットの決定
-* ハードウェア構成の重要な変更
-* 既存の動作確認済み方式を別方式へ置き換える場合
-
-### 6. Update Progress Documentation
-
-開発の節目では以下を整理する。
-
-* 現在の構成
-* 実機で成功した手順
-* 動作確認結果
-* 技術判断
-* 未解決事項
-* 次の課題
-
-Phaseごとの記録は以下に保存する。
+主要な保存先：
 
 ```text
-docs/progress/
+docs/specs/        これから作るもの
+docs/decisions/    なぜそうしたか
+docs/progress/     実際にできたもの
+docs/development/  開発プロセス・運用ルール
 ```
+
+重要な技術判断はADRとして記録し、未実装・未確認の内容を完了済みのprogressとして記録しない。
 
 ## Current Phase
 
@@ -119,7 +110,7 @@ Phase 0.5 — Robot Runtime
 
 Observe → Reason → Action → Log の基本ループは実機動作確認済み。
 
-Observeパイプライン(ソースとビルド手順は `edge/detection_logger/`):
+Observeパイプライン（ソースとビルド手順は `edge/detection_logger/`）：
 
 ```text
 Camera Module 3 Wide
@@ -137,7 +128,7 @@ detection_logger
 JSON Lines
 ```
 
-Robot Runtime(実装は `runtime/`、実機動作確認済み)：
+Robot Runtime（実装は `runtime/`、実機動作確認済み）：
 
 ```text
 JSON Lines
@@ -161,13 +152,15 @@ Log
 
 他のAI Agentが作成したコードや設計を、既存仕様を確認せずに置き換えない。
 
-変更前に関連する以下を確認する。
+変更前に、少なくとも対象に関連する以下を確認する。
 
 ```text
 README.md
 AGENTS.md
-docs/progress/
+docs/development/
+docs/specs/
 docs/decisions/
+docs/progress/
 ```
 
 既存の判断と異なる提案を行う場合は、既存案との差分と変更理由を示す。
@@ -184,12 +177,11 @@ docs/decisions/
 
 将来的に以下を考慮する。
 
-* Emergency Stop
-* Motor output limits
-* Command timeout
-* Watchdog
-* Fail-safe state
-* Manual override
+- Emergency Stop
+- Motor output limits
+- Command timeout
+- Watchdog
+- Fail-safe state
+- Manual override
 
 AI Agentの判断だけで安全制約を無効化しない。
-OK
