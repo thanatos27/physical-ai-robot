@@ -1,6 +1,6 @@
 # Physical AI Robot Project --- Phase 0.5 開発進捗
 
-更新日: 2026-09-19
+更新日: 2026-09-21
 
 ## 1. プロジェクトの目的
 
@@ -317,7 +317,10 @@ detection-logger-postproc.so
 
 ### detection_logger.cpp
 
-現在のJSON Lines版:
+> 注: 現在のソースとビルド手順は `edge/detection_logger/` にある(第15章、`edge/detection_logger/README.md`)。
+> 以下は ADR 0008 対応前の版で、`object_detect.results` を取得できないフレームでは何も出力しない。
+
+JSON Lines版(ADR 0008 対応前):
 
 ``` cpp
 #include <iostream>
@@ -486,7 +489,86 @@ std::vector<Detection>
 JSON Lines
 ```
 
-## 14. Phase 0.5 現在地
+## 14. Robot Runtime の実装と実機確認
+
+仕様は `docs/specs/phase-0.5-robot-runtime.md`。実装は `runtime/`、テストは `tests/runtime/`。Python 標準ライブラリのみで実装している。
+
+### 14.1 実装
+
+``` text
+runtime/
+├── models.py          データモデル
+├── input.py           JSONL の読み込み (InputSource)
+├── observation.py     DetectionEvent → Observation
+├── reasoner.py        Observation → Decision (person の有無)
+├── action.py          ActionPlanner / ConsoleExecutor
+├── robot_logger.py    Robot Data Log (JSONL)
+└── robot_runtime.py   Runtime 本体 / CLI
+```
+
+実行 (リポジトリルートで):
+
+``` bash
+rpicam-hello -t 10000 \
+  --post-process-file edge/detection_logger/hailo_yolov8_logger.json \
+  --nopreview | python3 -m runtime.robot_runtime
+```
+
+* Robot Data Log は既定で `logs/robot-data-<UTC日時>.jsonl` に保存する(`--log-path` で変更可、`logs/` は Git 管理外)
+* Application Log は stderr、Action のコンソール出力は stdout
+
+### 14.2 自動テスト
+
+開発PC(Windows、Python 3.13)で `python -m unittest discover -s tests -t .` を実行し、25件がパスした。Raspberry Pi 上でのテスト実行は未確認。
+
+### 14.3 実機確認 (Raspberry Pi 5、2026-09-21)
+
+* **Observe → Reason → Action → Log:** 人をカメラに映し、`Person detected` のコンソール出力と RobotLoopRecord の保存を確認した。保存されたログ3ファイル(100 / 68 / 63行)は、最終行の `loop_id` が行数と一致し、`schema_version`、`loop_id`、`timestamp`、`observation`、`decision`、`action`、`result` の7キーを持つ
+* **rpicam-apps の診断出力:** libcamera の INFO / WARN 等は stderr に出力され、パイプへ混入しない。Runtime の不正入力 WARN は大量発生しなかった
+* **EOF での終了:** `rpicam-hello -t 10000` の終了後、`Robot Runtime stopped` が出力され正常終了した
+* **Ctrl+C での終了:** `-t 0` で実行中に Ctrl+C を押すと、traceback なしで `Interrupted; stopping` → `Robot Runtime stopped` となった。`PIPESTATUS` は `130 0`(`rpicam-hello` が 130、Runtime が 0)。ログは38行で、最終行の `loop_id` も38
+
+これにより、仕様書の AC-08(人を映して `PERSON_DETECTED` → Console Action → RobotLoopRecord)を満たした。
+
+未確認:
+
+* 処理中(入力待ち以外)に SIGINT が来た場合の実機での挙動(単体テストのみ)
+* Robot Data 保存失敗(disk full 等)の実機での挙動
+
+## 15. 検出0件の正規化 (ADR 0008)
+
+### 15.1 問題
+
+カメラを覆って検出0件の状態で 10 秒実行したところ、`detection_logger` から JSONL が1行も出力されなかった。Robot Data Log は 0 行、`NO_PERSON` は 0 件だった。既存の3つのログにも `NO_PERSON` は無かった。
+
+`detection_logger` は `object_detect.results` を取得できないフレームでは何も出力せずに戻る。ADR 0008 のとおり、`hailo_yolo_inference` は Detection 0件のフレームで `object_detect.results` を設定しない場合がある。
+
+### 15.2 対応
+
+* ADR: `docs/decisions/0008-normalize-missing-detection-metadata-as-zero-detections.md`
+* 仕様書: 「object_detect.results が存在しないフレーム」を追記
+* `edge/detection_logger/detection_logger.cpp`: `object_detect.results` を取得できないとき、`detections` を空にして出力する
+* `edge/detection_logger/build.sh` と `README.md`: Raspberry Pi 5 上での再ビルド・配置手順(`bash build.sh install`。既存の `.so` は `build/backup/` へ退避する)
+
+Camera / Hailo / rpicam-apps の構成と `hailo_yolov8_logger.json` は変更していない。
+
+### 15.3 実機確認 (Raspberry Pi 5、2026-09-21)
+
+* `bash build.sh install` でビルドと配置に成功した
+* カメラを覆った状態で、`{"timestamp":...,"detections":[]}` が約33ms間隔(約30fps)で出力された
+* 人・椅子が映るフレームは、`class` / `category` / `confidence` / `bbox` の形式が従来のまま出力された
+* Runtime に接続して `-t 10000` で実行し、`No person detected` の出力と、`NO_PERSON` 271件の記録を確認した
+* 人の出入りに応じて、`Person detected` と `No person detected` が切り替わった
+
+### 15.4 観測した挙動と制限
+
+* 人が映り続けている間にも、1〜2フレームだけ `detections: []` になることがある。フレーム単位で判定する Reasoner は、その都度 `NO_PERSON` に切り替わる
+* ADR 0008 のとおり、正常な Detection 0件と、推論失敗・結果取得失敗は区別できない。上の挙動は、その区別が実際に問題になり得ることを示している
+* 連続するフレームで、confidence と bbox が完全に同一の検出結果が出力されることがある(原因は未確認)
+
+Phase 0.5 では対応しない。判定の安定化(複数フレームでの判定)や推論状態の導入は、必要になった時点で別途検討する。
+
+## 16. Phase 0.5 現在地
 
 ``` text
 Observe
@@ -497,14 +579,21 @@ Observe
  ├─ Detection metadata      ✓
  └─ JSON event              ✓
 
-Reason                       ← NEXT
+Reason
+ └─ person の有無の判定     ✓  (PERSON_DETECTED / NO_PERSON)
+
 Action
+ └─ ConsoleExecutor         ✓
+
 Log
+ └─ RobotLoopRecord (JSONL) ✓
 ```
 
-「AIが認識した映像を見る」段階から、「AIの認識結果をプログラムの入力として利用する」段階まで到達した。
+「AIが認識した映像を見る」段階から、「AIの認識結果をプログラムの入力として利用する」段階を経て、Observe → Reason → Action → Log の基本ループを実機で成立させる段階まで到達した。
 
-## 15. 次のステップ
+## 17. Robot Runtime 着手時の構想 (第14章で実施済み)
+
+> 注: 以下は Robot Runtime に着手する時点での構想の記録。実装と実機確認は第14章、検出0件の扱いは第15章に記録した。次の課題は第19章を参照。
 
 次は Python の `robot_runtime.py` を作成する。
 
@@ -549,7 +638,7 @@ timestamp付きで記録
 Phase 1でモーターやセンサーが追加された時も、Observation / Reason /
 Action / Log の境界を維持する。
 
-## 16. 将来的な全体像
+## 18. 将来的な全体像
 
 ``` text
 Physical Robot
@@ -584,14 +673,24 @@ Learning Pipeline
        └────────────→ Robot policy update
 ```
 
+## 19. 次の課題
+
+Phase 0.5 の基本ループは成立した。次に取り組む候補は以下(いずれも未着手)。
+
+* Phase 0.8 (Stationary AI Robot) への拡張(第2章のロードマップ)
+* 判定の安定化: 人が映っている間に単発で `NO_PERSON` へ切り替わる挙動への対応(複数フレームでの判定など)
+* 正常な Detection 0件と、推論失敗・結果取得失敗の区別(推論状態を表すメタデータや `inference_status` の導入。ADR 0008 の将来課題)
+* 第14章の「未確認」項目の実機確認
+
 ------------------------------------------------------------------------
 
 ## 現在の到達点
 
-**Phase 0.5 の Observe パイプラインは実機で動作確認済み。**
+**Phase 0.5 の Observe → Reason → Action → Log の基本ループは、実機で動作確認済み。**
 
-特に重要な成果は、Hailo-10HのYOLOv8推論結果を `object_detect.results`
-から取得し、自作 rpicam-apps post-processing plugin によって **1フレーム
-= 1 JSON event** として外部プログラムへ渡せる状態にしたこと。
+* Hailo-10H の YOLOv8 推論結果を、自作 rpicam-apps post-processing plugin (`detection_logger`) によって **1フレーム = 1 JSON event** として外部プログラムへ渡せる
+* `detection_logger` は、検出結果メタデータが無いフレームも `detections: []` へ正規化する(ADR 0008)
+* Python の Robot Runtime が JSONL を受け取り、`PERSON_DETECTED` / `NO_PERSON` を判定し、コンソールへ出力し、1 Loop = 1 RobotLoopRecord として保存する
+* EOF と Ctrl+C のどちらでも、Robot Data Log を壊さず正常終了する
 
-次の開発対象は **Robot Runtime / Reason 層**。
+次の課題は第19章を参照。

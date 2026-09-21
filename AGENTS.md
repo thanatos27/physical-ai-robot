@@ -117,7 +117,9 @@ docs/progress/
 Phase 0.5 — Robot Runtime
 ```
 
-Observeパイプラインは実機動作確認済み。
+Observe → Reason → Action → Log の基本ループは実機動作確認済み。
+
+Observeパイプライン(ソースとビルド手順は `edge/detection_logger/`):
 
 ```text
 Camera Module 3 Wide
@@ -135,7 +137,7 @@ detection_logger
 JSON Lines
 ```
 
-次の開発対象：
+Robot Runtime(実装は `runtime/`、実機動作確認済み)：
 
 ```text
 JSON Lines
