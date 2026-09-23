@@ -16,6 +16,7 @@ import logging
 import signal
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Iterator, Sequence
@@ -24,7 +25,13 @@ from .action import ActionPlanner, ConsoleExecutor, Executor
 from .dispatch import DispatchingVisionSource
 from .event import RuntimeEvent
 from .input import InputSource, stdin_input_source
-from .models import SCHEMA_VERSION, DetectionEvent, Observation, RobotLoopRecord
+from .models import (
+    SCHEMA_VERSION,
+    DetectionEvent,
+    EventRecord,
+    Observation,
+    RobotLoopRecord,
+)
 from .observation import ObservationAdapter
 from .reasoner import Reasoner, RuleBasedReasoner
 from .robot_logger import JsonlRobotDataLogger, RobotDataLogger
@@ -57,7 +64,7 @@ class RobotRuntime:
         self._data_logger = data_logger
 
         self.state = RuntimeState.STARTING
-        self._loop_id = 0
+        self._cycle_id = 0
         self._stop_requested = False
         self._waiting_for_input = False
 
@@ -86,7 +93,7 @@ class RobotRuntime:
             finally:
                 self.state = RuntimeState.STOPPED
                 logger.info("Robot Runtime stopped")
-        return self._loop_id
+        return self._cycle_id
 
     def _loop(self) -> None:
         events = iter(self._input_source)
@@ -106,28 +113,35 @@ class RobotRuntime:
             self._process(event)
 
     def _process(self, event: DetectionEvent | RuntimeEvent) -> None:
+        observation: Observation | None
+        event_record: EventRecord | None
         if isinstance(event, DetectionEvent):
             observation = self._adapter.adapt(event)
+            event_record = None
             reasoner_input = observation
+            timestamp = observation.timestamp
         else:
-            # Milestone 2 時点の暫定処理。Button 等 Event型入力には対応する
-            # Observation が存在しないため、Milestone 3 (Structured Event Log /
-            # Traceability, cycle_id 等の schema evolution) で正式対応する
-            # までの間、空の Observation を placeholder として記録する。
+            # Event型入力 (Button等) には Vision のような capture 時刻が無いため、
+            # Runtime がこの cycle を処理した時刻を timestamp とする
+            # (Vision の timestamp は検出時刻、Event の timestamp は処理時刻で
+            # 意味が異なる点に注意)。
+            observation = None
+            event_record = EventRecord(type=event.type, payload=event.payload)
             reasoner_input = event
-            observation = Observation(timestamp=0, objects=())
+            timestamp = int(time.time() * 1000)
 
         decision = self._reasoner.reason(reasoner_input)
         action = self._planner.plan(decision)
         result = self._executor.execute(action)
 
-        self._loop_id += 1
+        self._cycle_id += 1
         self._data_logger.log(
             RobotLoopRecord(
                 schema_version=SCHEMA_VERSION,
-                loop_id=self._loop_id,
-                timestamp=observation.timestamp,
+                cycle_id=self._cycle_id,
+                timestamp=timestamp,
                 observation=observation,
+                event=event_record,
                 decision=decision,
                 action=action,
                 result=result,

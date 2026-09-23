@@ -17,6 +17,7 @@ from runtime.models import (
     ActionStatus,
     ActionType,
     DecisionType,
+    EventRecord,
 )
 from runtime.observation import ObservationAdapter
 from runtime.reasoner import RuleBasedReasoner
@@ -28,9 +29,10 @@ FIXTURE = REPO_ROOT / "tests" / "fixtures" / "detections_sample.jsonl"
 
 EXPECTED_KEYS = {
     "schema_version",
-    "loop_id",
+    "cycle_id",
     "timestamp",
     "observation",
+    "event",
     "decision",
     "action",
     "result",
@@ -111,10 +113,11 @@ class RobotRuntimeTest(unittest.TestCase):
         self.assertEqual(len(records), 4)
         for record in records:
             self.assertEqual(set(record), EXPECTED_KEYS)
-            self.assertEqual(record["schema_version"], "0.1")
+            self.assertEqual(record["schema_version"], "0.2")
+            self.assertIsNone(record["event"])
             self.assertEqual(record["result"], {"status": "SUCCESS", "detail": None})
             self.assertEqual(record["timestamp"], record["observation"]["timestamp"])
-        self.assertEqual([r["loop_id"] for r in records], [1, 2, 3, 4])
+        self.assertEqual([r["cycle_id"] for r in records], [1, 2, 3, 4])
         self.assertEqual(
             [r["decision"]["type"] for r in records],
             ["PERSON_DETECTED", "NO_PERSON", "NO_PERSON", "PERSON_DETECTED"],
@@ -254,6 +257,9 @@ class ButtonEndToEndTest(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(adapter.calls, [("display", "Button pressed")])
         record = data_logger.records[0]
+        self.assertEqual(record.cycle_id, 1)
+        self.assertIsNone(record.observation)
+        self.assertEqual(record.event, EventRecord("BUTTON_PRESSED"))
         self.assertEqual(record.decision.type, DecisionType.BUTTON_ACKNOWLEDGED)
         self.assertEqual(record.action.type, ActionType.DISPLAY_MESSAGE)
         self.assertEqual(record.result.status, ActionStatus.SUCCESS)
@@ -281,6 +287,39 @@ class ButtonEndToEndTest(unittest.TestCase):
             [r.decision.type for r in data_logger.records],
             [DecisionType.NO_PERSON, DecisionType.BUTTON_ACKNOWLEDGED],
         )
+        # cycle_id は Vision / Event の種類に関わらず通し番号 (traceability, AC-21)。
+        self.assertEqual([r.cycle_id for r in data_logger.records], [1, 2])
+        vision_record, button_record = data_logger.records
+        # observation / event はどちらか一方だけが非 None になる。
+        self.assertIsNotNone(vision_record.observation)
+        self.assertIsNone(vision_record.event)
+        self.assertIsNone(button_record.observation)
+        self.assertIsNotNone(button_record.event)
+
+    def test_mixed_run_is_written_as_valid_jsonl_with_schema_v0_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "robot.jsonl"
+            runtime = RobotRuntime(
+                input_source=[two_events()[0], RuntimeEvent("BUTTON_PRESSED")],
+                adapter=ObservationAdapter(),
+                reasoner=RuleBasedReasoner(),
+                planner=ActionPlanner(),
+                executor=HardwareExecutor(FakeHardwareAdapter()),
+                data_logger=JsonlRobotDataLogger(log_path),
+            )
+            runtime.run()
+            records = read_records(log_path)
+
+        self.assertEqual(len(records), 2)
+        vision_record, button_record = records
+        self.assertEqual(vision_record["schema_version"], "0.2")
+        self.assertIsNotNone(vision_record["observation"])
+        self.assertIsNone(vision_record["event"])
+        self.assertIsNone(button_record["observation"])
+        self.assertEqual(
+            button_record["event"], {"type": "BUTTON_PRESSED", "payload": None}
+        )
+        self.assertEqual([vision_record["cycle_id"], button_record["cycle_id"]], [1, 2])
 
 
 class MainTest(unittest.TestCase):
@@ -306,7 +345,7 @@ class MainTest(unittest.TestCase):
         self.assertEqual(records[-1]["decision"]["type"], "PERSON_DETECTED")
         for record in records:
             self.assertEqual(set(record), EXPECTED_KEYS)
-            self.assertEqual(record["schema_version"], "0.1")
+            self.assertEqual(record["schema_version"], "0.2")
 
     def test_main_returns_one_on_unexpected_runtime_error(self):
         stdin = io.StringIO(FIXTURE.read_text(encoding="utf-8"))

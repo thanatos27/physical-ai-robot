@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any
 
-SCHEMA_VERSION = "0.1"
+SCHEMA_VERSION = "0.2"
 
 
 # --- 外部入力: detection_logger の JSONL 1行に対応 -----------------------------
@@ -99,13 +99,37 @@ class ActionResult:
 
 
 @dataclass(frozen=True)
+class EventRecord:
+    """Robot Event Log 用の Event 型入力 (Button 等) の記録。
+
+    `runtime.event.RuntimeEvent` と構造は同じだが、models.py は他の runtime
+    モジュールに依存しない方針のため、ここで独立して定義する。
+    """
+
+    type: str
+    payload: Any = None
+
+
+@dataclass(frozen=True)
 class RobotLoopRecord:
-    """1回の Runtime Loop の記録。1行の JSONL として保存される。"""
+    """1 cycle (Observation または Event → Reason → Action → Result) の記録。
+
+    1行の JSONL として保存される。
+
+    schema v0.2 (#18.2, Milestone 3 Structured Event Log / Traceability):
+    - `loop_id` を `cycle_id` へ改名した (意味は同じ: 1から始まる連番の
+      correlation identifier)。
+    - `observation` は Vision 由来の cycle でのみ値を持つ (Optional)。
+    - `event` を新設し、Button 等 Event 型入力由来の cycle でのみ値を持つ。
+      `observation` / `event` はどちらか一方だけが非 None になる。
+    - v0.1 との後方互換性は取らない (既知の外部 log reader は存在しない)。
+    """
 
     schema_version: str
-    loop_id: int
+    cycle_id: int
     timestamp: int
-    observation: Observation
+    observation: Observation | None
+    event: EventRecord | None
     decision: Decision
     action: Action
     result: ActionResult
