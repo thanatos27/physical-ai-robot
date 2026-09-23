@@ -61,6 +61,7 @@ class DecisionType(str, Enum):
     PERSON_DETECTED = "PERSON_DETECTED"
     NO_PERSON = "NO_PERSON"
     BUTTON_ACKNOWLEDGED = "BUTTON_ACKNOWLEDGED"
+    AI_RESULT_RECEIVED = "AI_RESULT_RECEIVED"
 
 
 @dataclass(frozen=True)

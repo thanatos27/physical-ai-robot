@@ -30,6 +30,12 @@ _PLANS: dict[DecisionType, Action] = {
     DecisionType.BUTTON_ACKNOWLEDGED: Action(
         ActionType.DISPLAY_MESSAGE, "Button pressed"
     ),
+    # Milestone 4: AI Result Event が Core まで届くことの最小限の proof。
+    # 実際の AI 出力内容を表示する対応は Milestone 7 (AI Connectivity Proof)
+    # で ActionPlanner に Decision の payload を持たせる際に拡張する。
+    DecisionType.AI_RESULT_RECEIVED: Action(
+        ActionType.DISPLAY_MESSAGE, "AI result received"
+    ),
 }
 
 _CONSOLE_ACTIONS = frozenset(ActionType)
