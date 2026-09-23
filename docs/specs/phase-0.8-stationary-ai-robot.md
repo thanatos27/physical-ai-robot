@@ -421,7 +421,27 @@ Policy:
 Latest wins
 ```
 
-古い State を無制限に Queue へ蓄積しない。
+State の実データ本体は Queue へ蓄積せず、State Store に最新値を保持する。
+
+Vision の場合:
+
+```text
+latest_vision
+    ← Vision data は更新のたびに最新値へ上書き
+
+Dispatch Queue
+    ← VISION_STATE_UPDATED 通知のみ投入
+```
+
+未処理の `VISION_STATE_UPDATED` が Dispatch Queue に存在しない場合のみ通知を enqueue する。
+
+すでに同通知が pending の場合、新しい Vision data では `latest_vision` だけを更新し、通知は追加しない。
+
+したがって Phase 0.8 では、Dispatch Queue 内の未処理 `VISION_STATE_UPDATED` は最大1件とする。
+
+Runtime が通知を処理するときは、その時点の最新 `latest_vision` を読む。
+
+将来 IMU / ToF 等を追加する場合も、原則として State 種別ごとに pending 通知最大1件へ拡張する。
 
 ### 10.2 Event 型
 
@@ -436,8 +456,11 @@ Latest wins
 Policy:
 
 ```text
+1 Event = 1 Queue item
 FIFO
 ```
+
+通常利用範囲では Event を drop しない。
 
 Phase 0.8 では高度な Event Bus を導入しない。
 
@@ -607,6 +630,22 @@ AI Job 完了時は `AI Job completed` 相当の Event を Runtime 入力側へ�
 
 Phase 0.8 の変更点は「Core を非同期化すること」ではなく、「Vision 以外の Event Source と AI Result Source を同期 Core へ多重化できるようにすること」とする。
 
+複数 Input Source の merge は、Runtime Core の手前に置く Dispatch Queue で行う。
+
+```text
+Vision Producer
+    ├─ latest_vision を更新
+    └─ VISION_STATE_UPDATED を必要時のみ enqueue
+                                  │
+Button Producer ──────────────────┼→ Dispatch Queue (FIFO)
+                                  │
+AI Result Producer ───────────────┘
+                                  ↓
+                         synchronous Runtime Core
+```
+
+State 通知と Event の間に明示的な優先順位は設けず、Dispatch Queue への enqueue 順で処理する。
+
 実装時には以下を確認する。
 
 - 現行 `stdin_input_source` と複数 Event Source の統合方法
@@ -731,17 +770,52 @@ Phase 0.8 の default policy は以下とする。
 ```text
 State input
   → latest wins
+  → State 本体は latest value として保持
+  → Dispatch Queue には State 種別ごとに pending 通知最大1件
 
 Button / Device Event
+  → 1 Event = 1 Queue item
   → FIFO
+  → 通常利用範囲では drop しない
 
 AI Result Event
+  → 1 Event = 1 Queue item
   → FIFO
+
+State notification vs Event
+  → 明示的な優先順位なし
+  → Dispatch Queue への enqueue 順で処理
 
 AI Job Request
   → 同一 Job Type につき running 1件 + pending 最新1件
   → pending 中に新しい同種 request が来た場合は pending を置換
 ```
+
+Vision の例:
+
+```text
+Vision #100
+  → latest_vision = #100
+  → Queue: [VISION_STATE_UPDATED]
+
+Vision #101
+  → latest_vision = #101
+  → Queue: [VISION_STATE_UPDATED]  # 通知追加なし
+
+Button Event
+  → Queue: [VISION_STATE_UPDATED, BUTTON_EVENT]
+
+Vision #102
+  → latest_vision = #102
+  → Queue: [VISION_STATE_UPDATED, BUTTON_EVENT]  # 通知追加なし
+
+Runtime processes VISION_STATE_UPDATED
+  → latest_vision #102 を処理
+```
+
+この方式を FIFO Dispatch + State Coalescing とする。
+
+Event 優先 / Vision 優先は設けず、Phase 0.8 では Priority Scheduler を導入しない。
 
 この AI Job Request policy は Phase 0.8 の簡易方針であり、ユーザー操作を常に捨ててよいという恒久ルールではない。
 
@@ -917,9 +991,13 @@ Observation → Reason → Action → Log の1 cycle が成立する。
 
 Vision 等の State 型入力を無制限に Queue へ蓄積しない。
 
+Vision については、State 本体を latest value として保持し、未処理 `VISION_STATE_UPDATED` を Dispatch Queue 内に最大1件だけ保持する。
+
 ### AC-09 Event Ordering
 
 Button 等の Event 型入力を通常利用範囲で発生順に処理できる。
+
+State 更新通知と Event の間に明示的な優先順位を設けず、Dispatch Queue への enqueue 順で処理できる。
 
 ### AC-10 Deterministic Rule
 
