@@ -227,6 +227,11 @@ class RobotRuntimeTest(unittest.TestCase):
 
 class MainTest(unittest.TestCase):
     def test_main_processes_stdin_and_returns_zero(self):
+        # main() は Phase 0.8 Dispatch path (DispatchingVisionSource) を使う。
+        # State Coalescing により raw DetectionEvent 数と RobotLoopRecord 数の
+        # 一致は要求しない (docs/specs/phase-0.8-implementation-plan.md
+        # #Regression Boundary)。「1件以上処理される」「最終的に最新の Vision
+        # State へ追従する」ことだけを確認する。
         stdin = io.StringIO(FIXTURE.read_text(encoding="utf-8"))
         stdout = io.StringIO()
         with tempfile.TemporaryDirectory() as tmp:
@@ -236,8 +241,14 @@ class MainTest(unittest.TestCase):
             records = read_records(log_path)
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(stdout.getvalue().splitlines(), EXPECTED_CONSOLE)
-        self.assertEqual(len(records), 4)
+        console_lines = stdout.getvalue().splitlines()
+        self.assertGreaterEqual(len(console_lines), 1)
+        self.assertEqual(console_lines[-1], EXPECTED_CONSOLE[-1])
+        self.assertGreaterEqual(len(records), 1)
+        self.assertEqual(records[-1]["decision"]["type"], "PERSON_DETECTED")
+        for record in records:
+            self.assertEqual(set(record), EXPECTED_KEYS)
+            self.assertEqual(record["schema_version"], "0.1")
 
     def test_main_returns_one_on_unexpected_runtime_error(self):
         stdin = io.StringIO(FIXTURE.read_text(encoding="utf-8"))
@@ -255,6 +266,8 @@ class MainTest(unittest.TestCase):
 
 class CliEndToEndTest(unittest.TestCase):
     def test_module_runs_with_stdin_redirect(self):
+        # Dispatch path (State Coalescing) のため件数一致は要求しない。
+        # MainTest.test_main_processes_stdin_and_returns_zero と同じ基準。
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "robot.jsonl"
             with FIXTURE.open("rb") as stdin:
@@ -270,10 +283,13 @@ class CliEndToEndTest(unittest.TestCase):
             records = read_records(log_path)
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(proc.stdout.splitlines(), EXPECTED_CONSOLE)
+        console_lines = proc.stdout.splitlines()
+        self.assertGreaterEqual(len(console_lines), 1)
+        self.assertEqual(console_lines[-1], EXPECTED_CONSOLE[-1])
         self.assertIn("WARNING", proc.stderr)
         self.assertIn("Robot Runtime started", proc.stderr)
-        self.assertEqual(len(records), 4)
+        self.assertGreaterEqual(len(records), 1)
+        self.assertEqual(records[-1]["decision"]["type"], "PERSON_DETECTED")
 
 
 if __name__ == "__main__":

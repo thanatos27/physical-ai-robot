@@ -21,6 +21,7 @@ from enum import Enum
 from typing import Iterator, Sequence
 
 from .action import ActionPlanner, ConsoleExecutor, Executor
+from .dispatch import DispatchingVisionSource
 from .input import InputSource, stdin_input_source
 from .models import SCHEMA_VERSION, DetectionEvent, RobotLoopRecord
 from .observation import ObservationAdapter
@@ -178,7 +179,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         runtime = RobotRuntime(
-            input_source=stdin_input_source(),
+            # Phase 0.8 Dispatch path (docs/specs/phase-0.8-implementation-plan.md
+            # #Regression Boundary): Vision は State Coalescing を経由する。
+            # raw DetectionEvent 数と RobotLoopRecord 数の一致は要求しない。
+            input_source=DispatchingVisionSource(stdin_input_source()),
             adapter=ObservationAdapter(),
             reasoner=RuleBasedReasoner(),
             planner=ActionPlanner(),
