@@ -385,15 +385,15 @@ runtime/
 ├── ...
 ├── event.py              # 必要になった場合
 ├── state.py              # Runtime State
-├── ai_job.py             # AI Job data model
-├── ai_manager.py         # AI Job lifecycle
-├── npu_arbiter.py        # NPU resource boundary
+├── ai.py                 # AI Job / Job Manager / NPU resource boundary の初期配置候補
 └── adapters/
     ├── whisplay.py       # 初期は1ファイルでもよい
     └── mock.py
 ```
 
-ファイル分割は責務が増えた時点で行う。
+AI 側も Whisplay Adapter と同様に、初期は1ファイルまたは最小限の構成から開始する。
+
+`AIJob` / `AIJobManager` / `NpuArbiter` は Architecture 上の責務として分離するが、Python ファイルまで先行分割しない。責務や実装量が増えた時点で `ai_job.py` / `ai_manager.py` / `npu_arbiter.py` 等へ分割する。
 
 将来の可能性だけを理由に細かいディレクトリ階層を先行導入しない。
 
@@ -583,30 +583,37 @@ VLM running
     └─ Device status     → 更新可能
 ```
 
-### 15.2 Candidate Execution Model
+### 15.2 Execution Model
 
-Phase 0.8 の候補:
+Phase 0.8 では、Phase 0.5 で実機確認済みの同期 Runtime Core と SIGINT / Shutdown 処理を維持する。
 
 ```text
-Runtime Control Plane
-        → asyncio
-
-Existing rpicam-apps
-        → external process
-
+Existing synchronous Runtime Core
+        ↑
+        │ Event / Result
+        │
+AI Job Manager
+        ↓
+Worker thread / process
+        ↓
 Blocking / Native AI
-        → worker process
 ```
 
-ただし `asyncio + subprocess` を最終確定とはしない。
+Runtime Core 自体を asyncio へ全面移行しない。
 
-設計レビューで以下を確認する。
+AI Job Manager は Runtime Core から分離して動作させる。実装方式は thread または subprocess を候補とし、必要であれば AI Job Manager 内部で asyncio を利用してよい。
 
-- 現在の同期 Runtime からの移行コスト
-- Shutdown / cancellation の複雑性
-- Thread / Process / asyncio の責務分割
-- Phase 0.8 に対して過剰でないか
-- Phase 1 以降で全面変更にならないか
+AI Job 完了時は `AI Job completed` 相当の Event を Runtime 入力側へ返し、既存 Core は通常 Event として処理する。
+
+Phase 0.8 の変更点は「Core を非同期化すること」ではなく、「Vision 以外の Event Source と AI Result Source を同期 Core へ多重化できるようにすること」とする。
+
+実装時には以下を確認する。
+
+- 現行 `stdin_input_source` と複数 Event Source の統合方法
+- SIGINT / Shutdown の既存挙動を壊さないこと
+- Worker の停止・timeout・exception propagation
+- thread と subprocess のどちらが Phase 0.8 に適切か
+- Phase 1 以降で Worker 実装を交換できる境界になっているか
 
 ---
 
@@ -657,7 +664,23 @@ EXCLUSIVE_AI
 
 実機で共存が確認できるまでは、NPU は競合し得る Exclusive Resource として扱う。
 
-ただし Phase 0.8 の時点で必ず、
+Phase 0.8 の VLM Proof は、連続 Streaming ではなく on-demand の単一画像推論とする。
+
+```text
+User / Runtime request
+        ↓
+single camera image
+        ↓
+VLM Job
+        ↓
+short description
+        ↓
+AI Result Event
+```
+
+VLM Backend は Hailo-10H 上の Local VLM を第一候補とする。これにより、既存の連続 YOLO と on-demand VLM の共存可否を Phase 0.8 で小さく実機検証する。
+
+ただし設計段階で必ず、
 
 ```text
 YOLO stop
@@ -667,7 +690,14 @@ YOLO stop
 
 を実装するとは決めない。
 
-Hailo / VDevice / model の実機挙動を確認した上で決定する。
+まず Hailo / VDevice / model の実機挙動を確認し、
+
+- 共存可能なら軽量な Resource 管理
+- 共存不可なら Vision Process Lifecycle と協調した排他
+
+のどちらが必要かを決定する。
+
+この実機検証結果によって NPU Arbiter の具体実装を確定する。
 
 ---
 
@@ -696,7 +726,26 @@ AI Job については Job Type ごとに将来、
 
 等を選択可能な責務境界を残す。
 
-Phase 0.8 では汎用 Policy Engine を実装しない。
+Phase 0.8 の default policy は以下とする。
+
+```text
+State input
+  → latest wins
+
+Button / Device Event
+  → FIFO
+
+AI Result Event
+  → FIFO
+
+AI Job Request
+  → 同一 Job Type につき running 1件 + pending 最新1件
+  → pending 中に新しい同種 request が来た場合は pending を置換
+```
+
+この AI Job Request policy は Phase 0.8 の簡易方針であり、ユーザー操作を常に捨ててよいという恒久ルールではない。
+
+Phase 0.8 では汎用 Policy Engine、Priority Queue、Preemption、Starvation Control は実装しない。
 
 ---
 
@@ -802,15 +851,21 @@ text
 
 ### VLM
 
+Phase 0.8 では on-demand の単一画像推論とする。
+
 ```text
-Camera Image
+Request
  ↓
-VLM
+single Camera Image
+ ↓
+Local VLM (Hailo-10H 第一候補)
  ↓
 short description
 ```
 
 が成立すればよい。
+
+連続 Streaming VLM は Phase 0.8 の対象外とする。
 
 ### LLM
 
@@ -1004,7 +1059,9 @@ Mic → STT → text が一度以上成功する。
 
 ### AC-EXT-02 VLM Proof
 
-Camera Image → VLM → short description が一度以上成功する。
+on-demand の single Camera Image → Local VLM → short description が一度以上成功する。
+
+Hailo-10H を第一候補 Backend とし、既存 YOLO との共存可否を実機で確認する。
 
 ### AC-EXT-03 LLM Proof
 
@@ -1050,12 +1107,14 @@ Phase 0.8 Design Review では Hardware / Runtime 境界よりも、以下を重
 
 ### Review-01 AI Execution Model
 
-`asyncio + subprocess` を Control Plane とする案は適切か。
+レビュー結果として Runtime Core の同期構造を維持する。
 
-- 現行同期 Runtime からの移行コスト
-- shutdown race
+AI Job Manager / Worker の隔離方式について、thread / subprocess / 必要に応じた内部 asyncio の責務分割を実装時に検証する。
+
+- 既存 stdin / SIGINT / Shutdown の維持
+- Worker shutdown race
 - exception propagation
-- cancellation
+- timeout / cancellation
 - testability
 - Phase 1 以降の拡張性
 
