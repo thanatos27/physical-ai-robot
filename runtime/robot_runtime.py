@@ -22,8 +22,9 @@ from typing import Iterator, Sequence
 
 from .action import ActionPlanner, ConsoleExecutor, Executor
 from .dispatch import DispatchingVisionSource
+from .event import RuntimeEvent
 from .input import InputSource, stdin_input_source
-from .models import SCHEMA_VERSION, DetectionEvent, RobotLoopRecord
+from .models import SCHEMA_VERSION, DetectionEvent, Observation, RobotLoopRecord
 from .observation import ObservationAdapter
 from .reasoner import Reasoner, RuleBasedReasoner
 from .robot_logger import JsonlRobotDataLogger, RobotDataLogger
@@ -104,9 +105,19 @@ class RobotRuntime:
                 self._waiting_for_input = False
             self._process(event)
 
-    def _process(self, event: DetectionEvent) -> None:
-        observation = self._adapter.adapt(event)
-        decision = self._reasoner.reason(observation)
+    def _process(self, event: DetectionEvent | RuntimeEvent) -> None:
+        if isinstance(event, DetectionEvent):
+            observation = self._adapter.adapt(event)
+            reasoner_input = observation
+        else:
+            # Milestone 2 時点の暫定処理。Button 等 Event型入力には対応する
+            # Observation が存在しないため、Milestone 3 (Structured Event Log /
+            # Traceability, cycle_id 等の schema evolution) で正式対応する
+            # までの間、空の Observation を placeholder として記録する。
+            reasoner_input = event
+            observation = Observation(timestamp=0, objects=())
+
+        decision = self._reasoner.reason(reasoner_input)
         action = self._planner.plan(decision)
         result = self._executor.execute(action)
 

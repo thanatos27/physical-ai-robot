@@ -60,6 +60,7 @@ class Observation:
 class DecisionType(str, Enum):
     PERSON_DETECTED = "PERSON_DETECTED"
     NO_PERSON = "NO_PERSON"
+    BUTTON_ACKNOWLEDGED = "BUTTON_ACKNOWLEDGED"
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,11 @@ class Decision:
 class ActionType(str, Enum):
     REPORT_PERSON_DETECTED = "REPORT_PERSON_DETECTED"
     REPORT_NO_PERSON = "REPORT_NO_PERSON"
+    # Whisplay Hardware Action (#13, Milestone 2)。LED状態や再生する音声clipの
+    # 識別子も、既存 schema を変えないため message (str) に格納する。
+    DISPLAY_MESSAGE = "DISPLAY_MESSAGE"
+    SET_LED = "SET_LED"
+    PLAY_AUDIO = "PLAY_AUDIO"
 
 
 @dataclass(frozen=True)

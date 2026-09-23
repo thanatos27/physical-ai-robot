@@ -7,9 +7,17 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from runtime.action import ActionPlanner, ConsoleExecutor
+from runtime.action import ActionPlanner, ConsoleExecutor, HardwareExecutor
+from runtime.adapters.mock import FakeHardwareAdapter
+from runtime.event import RuntimeEvent
 from runtime.input import JsonlInputSource, parse_detection_event
-from runtime.models import Action, ActionResult, ActionStatus, ActionType
+from runtime.models import (
+    Action,
+    ActionResult,
+    ActionStatus,
+    ActionType,
+    DecisionType,
+)
 from runtime.observation import ObservationAdapter
 from runtime.reasoner import RuleBasedReasoner
 from runtime.robot_logger import JsonlRobotDataLogger
@@ -223,6 +231,56 @@ class RobotRuntimeTest(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertTrue(data_logger.closed)
         self.assertEqual(runtime.state, RuntimeState.STOPPED)
+
+
+class ButtonEndToEndTest(unittest.TestCase):
+    """Milestone 2 E2E: Fake Button → Event → Rule Reason →
+    Display/LED/Speaker Action → Fake Adapter → Log (AC-17)。"""
+
+    def test_button_press_reaches_display_action_and_is_logged(self):
+        adapter = FakeHardwareAdapter()
+        data_logger = RecordingLogger()
+        runtime = RobotRuntime(
+            input_source=[RuntimeEvent("BUTTON_PRESSED")],
+            adapter=ObservationAdapter(),
+            reasoner=RuleBasedReasoner(),
+            planner=ActionPlanner(),
+            executor=HardwareExecutor(adapter),
+            data_logger=data_logger,
+        )
+
+        count = runtime.run()
+
+        self.assertEqual(count, 1)
+        self.assertEqual(adapter.calls, [("display", "Button pressed")])
+        record = data_logger.records[0]
+        self.assertEqual(record.decision.type, DecisionType.BUTTON_ACKNOWLEDGED)
+        self.assertEqual(record.action.type, ActionType.DISPLAY_MESSAGE)
+        self.assertEqual(record.result.status, ActionStatus.SUCCESS)
+
+    def test_vision_and_button_events_can_be_mixed_in_one_run(self):
+        # DetectionEvent (Vision) と RuntimeEvent (Button) が同じ RobotRuntime
+        # で正しく multiplex 処理されることを確認する (Milestone 1 の Dispatch
+        # 基盤と Milestone 2 の Reasoner 拡張が両立することの証明)。
+        adapter = FakeHardwareAdapter()
+        data_logger = RecordingLogger()
+        vision_event = two_events()[0]
+        runtime = RobotRuntime(
+            input_source=[vision_event, RuntimeEvent("BUTTON_PRESSED")],
+            adapter=ObservationAdapter(),
+            reasoner=RuleBasedReasoner(),
+            planner=ActionPlanner(),
+            executor=HardwareExecutor(adapter),
+            data_logger=data_logger,
+        )
+
+        count = runtime.run()
+
+        self.assertEqual(count, 2)
+        self.assertEqual(
+            [r.decision.type for r in data_logger.records],
+            [DecisionType.NO_PERSON, DecisionType.BUTTON_ACKNOWLEDGED],
+        )
 
 
 class MainTest(unittest.TestCase):

@@ -119,13 +119,19 @@ class DispatchingVisionSource:
         self._thread = threading.Thread(target=self._produce, daemon=True)
         self._started = False
 
-    def __iter__(self) -> Iterator[DetectionEvent]:
+    @property
+    def dispatch_queue(self) -> DispatchQueue:
+        """Button 等、Vision 以外の producer が同じ Dispatch Queue へ Event を
+        投入するための参照 (Milestone 2)。"""
+        return self._dispatch
+
+    def __iter__(self) -> Iterator[DetectionEvent | RuntimeEvent]:
         if not self._started:
             self._started = True
             self._thread.start()
         return self
 
-    def __next__(self) -> DetectionEvent:
+    def __next__(self) -> DetectionEvent | RuntimeEvent:
         event = self._dispatch.pop()
         if event.type == self._channel.notification_type:
             value = self._channel.latest()
@@ -135,9 +141,8 @@ class DispatchingVisionSource:
             raise StopIteration
         if event.type == _ERROR:
             raise event.payload
-        # Milestone 1 時点ではこの Source は Vision 専用であり、他の Event 種別を
-        # 消費する経路がない。静かに無視せず、想定外として扱う。
-        raise RuntimeError(f"Unhandled dispatch event type: {event.type!r}")
+        # Vision 以外の Event (Button / AI Result 等) はそのまま RobotRuntime へ渡す。
+        return event
 
     def _produce(self) -> None:
         try:

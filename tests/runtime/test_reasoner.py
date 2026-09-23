@@ -1,5 +1,6 @@
 import unittest
 
+from runtime.event import RuntimeEvent
 from runtime.models import BoundingBox, Decision, DecisionType, Observation, ObservedObject
 from runtime.reasoner import RuleBasedReasoner
 
@@ -40,6 +41,16 @@ class RuleBasedReasonerTest(unittest.TestCase):
             self.reasoner.reason(observation()),
             Decision(DecisionType.NO_PERSON),
         )
+
+    def test_button_pressed_event_is_acknowledged(self):
+        self.assertEqual(
+            self.reasoner.reason(RuntimeEvent("BUTTON_PRESSED")),
+            Decision(DecisionType.BUTTON_ACKNOWLEDGED),
+        )
+
+    def test_unknown_event_type_raises(self):
+        with self.assertRaises(ValueError):
+            self.reasoner.reason(RuntimeEvent("SOMETHING_ELSE"))
 
 
 if __name__ == "__main__":
