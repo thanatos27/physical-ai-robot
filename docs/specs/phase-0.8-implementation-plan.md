@@ -124,6 +124,44 @@ Runtime Core 自体を asyncio へ全面移行しない。
 
 Phase 0.5 の stdin / SIGINT / Shutdown の実機確認済み挙動を不用意に壊さない。
 
+### Regression Boundary
+
+Phase 0.5 legacy direct-input path と Phase 0.8 Dispatch path は、回帰要件を分けて扱う。
+
+```text
+Phase 0.5 legacy path
+
+JsonlInputSource
+    ↓
+RobotRuntime
+
+1 valid DetectionEvent = 1 cycle
+```
+
+Legacy direct-input test では、既存どおり valid DetectionEvent 1件につき1 cycle / 1 RobotLoopRecord の挙動を維持する。
+
+一方、Phase 0.8 production path では Vision を State 型として扱う。
+
+```text
+Vision Producer
+    ↓
+latest Vision State
+    ↓
+State Coalescing
+    ↓
+Dispatch Queue
+    ↓
+RobotRuntime
+```
+
+この path では intermediate Vision State の coalescing を許容し、raw DetectionEvent 数と RobotLoopRecord 数の一致は要求しない。
+
+Robot Runtime は古い Vision State の全件逐次処理より、処理可能な時点で最新の Vision State へ追従することを優先する。
+
+Button / AI Result 等の Event 型入力はこの例外ではなく、引き続き FIFO ordering を維持する。
+
+将来、Behavior Cloning / Dataset Logging 等で全 frame 履歴が必要になった場合は、Runtime Dispatch Queue に全件保持させず、別の Dataset Logger 等へ責務分離する。
+
 ### Tasks
 
 - State 型と Event 型を区別できる最小 data model を追加
@@ -149,8 +187,10 @@ Input Multiplexing の実装方式は、既存 SIGINT / Shutdown を壊さない
 ### Tests
 
 - Vision State を連続投入しても backlog が無制限に増えない
+- Dispatch path で、処理時点に取得される Vision が最新 State であること
 - Event FIFO ordering
-- Phase 0.5 Detection fixture が従来通り処理される
+- Phase 0.5 legacy direct-input path では Detection fixture の valid event が従来どおり1件ずつ処理されること
+- Phase 0.8 Dispatch path では Detection fixture の入力件数と RobotLoopRecord 件数の一致を要求しない
 - EOF / stop / SIGINT の既存 unit test を維持
 - Runtime State update
 
@@ -621,7 +661,12 @@ python -m unittest discover -s tests -t .
 - existing Phase 0.5 parser
 - Observation conversion
 - RuleReasoner
-- existing Runtime E2E fixture
+- Phase 0.5 legacy direct-input E2E fixture
+  - valid DetectionEvent 1件 = 1 cycle の回帰を維持
+- Phase 0.8 Dispatch path
+  - Vision State coalescing を許容
+  - raw input 件数と RobotLoopRecord 件数の一致は要求しない
+  - backlog bounded / latest State processing を確認
 - State latest-only
 - Event FIFO
 - Fake Hardware
@@ -697,6 +742,7 @@ Implementation PR には最低限以下を含める。
 
 ## Design / Spec
 - docs/specs/phase-0.8-stationary-ai-robot.md
+- docs/specs/phase-0.8-implementation-plan.md
 
 ## Automated Tests
 - [ ] existing regression
