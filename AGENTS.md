@@ -105,10 +105,20 @@ docs/development/  開発プロセス・運用ルール
 現在：
 
 ```text
-Phase 0.5 — Robot Runtime
+Phase 0.8 — Stationary AI Robot
+Design complete / Implementation in progress
 ```
 
-Observe → Reason → Action → Log の基本ループは実機動作確認済み。
+Phase 0.5 の Observe → Reason → Action → Log 基本ループは実機動作確認済み。
+
+Phase 0.8 の確定設計と実装計画：
+
+```text
+docs/specs/phase-0.8-stationary-ai-robot.md
+docs/specs/phase-0.8-implementation-plan.md
+```
+
+Phase 0.8 では Phase 0.5 の実機確認済み Runtime を基盤として、Whisplay HAT、Hardware Adapter、AI Job isolation、NPU resource management を段階的に追加する。
 
 Observeパイプライン（ソースとビルド手順は `edge/detection_logger/`）：
 
