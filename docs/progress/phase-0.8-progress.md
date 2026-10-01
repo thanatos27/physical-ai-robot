@@ -402,8 +402,31 @@ Milestone 7 の作業中の再起動後、公式 `test.py` を含め LCD に描�
   (PiSugar の既定は 100 MHz)
 
 積層の嵌合状態で LCD がほぼ使えなくなり、正しく嵌合していても高速 SPI の余裕が
-小さいと考えられる。対策 (SPI クロックを下げる / ハードウェア側の対策等) は
-Design Issue #8 で判断を仰いでいる。
+小さいと考えられる (原因を SPI clock のみとは断定しない)。
+
+**決定 (Design Issue #8):** Phase 0.8 では LCD の SPI clock を暫定 8 MHz とし、
+表示の安定性を優先する。組み立て時は GPIO stacking header の嵌合状態を確認する。
+最終値は Milestone 11 で 8 / 16 / 32 MHz を比較して決める。8 MHz でも再発する
+場合はハードウェア側の対策を検討する。
+
+**実装 (`8b6dc1a`):** `RealWhisplayAdapter` が SPI clock を設定し (既定 8 MHz、
+`WHISPLAY_SPI_HZ` で上書き可)、その速度で LCD を初期化し直す。PiSugar の
+`WhisplayBoard` は生成時に 100 MHz で LCD を初期化するため、初期化し直しには
+PiSugar の非公開メソッド (`_reset_lcd` / `_init_display`) を使う。
+
+**実機確認 (2026-10-02、8 MHz):**
+
+* 起動時に `Whisplay LCD SPI speed: 8000000 Hz` が出力された
+* Button E2E、Vision E2E とも LCD にノイズ・欠けは無かった
+* Vision E2E (30秒) の処理件数は 674 件 (約22.5件/秒、PERSON_DETECTED 288、
+  NO_PERSON 386)。Milestone 6 (100 MHz) の 887 件より約213件少ない
+* 表示の切り替わりは 53 回。8 MHz での1画面 (240x280、RGB565) の描画は約0.13秒で、
+  53 回 × 約0.13秒 ≒ 約6.9秒 ≒ 30fps で約207フレーム分となり、処理件数の減少を
+  ほぼ説明できる。描画中に届いた Vision は State Coalescing で最新値にまとめられる
+  ため backlog は溜まらず、Core の停止は1回あたり約0.13秒 (AC-27 の数秒単位の
+  遅延には当たらない)
+* Milestone 6 のログは残っておらず、100 MHz 時の切り替わり回数との厳密な比較は
+  できていない
 
 AI HAT+ 2 の付け外しの際にカメラの FFC ケーブルが外れ、再接続後の再起動で
 認識が戻った (CSI カメラは起動時にのみ検出される)。AI HAT+ 2 は再装着後も
@@ -416,11 +439,12 @@ HAILO10H (FW 5.1.1) として認識されている。
 * 種類の異なる AI Job (STT / LLM / VLM) を同時に実 NPU で実行した場合
   (Milestone 7 で統合したのは VLM のみ。Milestone 8 / 9)
 * STT 精度の改善、日本語での認識 (6.4)
-* LCD 積層問題の恒久対策 (Design Issue #8)
+* LCD の SPI clock の最終値 (8 / 16 / 32 MHz の比較、Milestone 11)。長時間運転で
+  8 MHz でも表示異常が再発しないか
 
 ## 7. 次の課題
 
-* Design Issue #8 (Whisplay 積層時の LCD) の方針確定と対応
 * Milestone 8: Hailo YOLO / VLM Coexistence Spike (NPU とカメラの共存)
+* Milestone 11: LCD の SPI clock (8 / 16 / 32 MHz) の比較 (Design Issue #8)
 * 5.3 の Button 表示が Vision に上書きされる挙動は、Button に対する UX を
   決める際に設計側で扱う
