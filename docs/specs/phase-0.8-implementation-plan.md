@@ -570,6 +570,7 @@ Robot Event Log
 - VLM 出力文の LCD 表示、およびそのための Decision / Action / schema 変更は Milestone 7 では行わない
 
 この方式は Connectivity Proof 用の暫定構成である。常駐 worker、model resident、YOLO / VLM の共存方式、Camera sharing、NPU arbitration の最終形は Milestone 8 の実機結果をもとに決定する。
+
 ### Related AC
 
 - AC-EXT-01
@@ -611,6 +612,7 @@ on-demand Local VLM
 - per-job subprocess を継続すべきか、常駐 worker / model resident が成立するか
 - latency / memory / temperature
 - failure 時の復旧
+
 ### Decision
 
 #### coexistence possible
