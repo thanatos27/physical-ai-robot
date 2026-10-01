@@ -442,9 +442,56 @@ HAILO10H (FW 5.1.1) として認識されている。
 * LCD の SPI clock の最終値 (8 / 16 / 32 MHz の比較、Milestone 11)。長時間運転で
   8 MHz でも表示異常が再発しないか
 
-## 7. 次の課題
+## 7. Milestone 8 --- Hailo YOLO / VLM Coexistence Spike
 
-* Milestone 8: Hailo YOLO / VLM Coexistence Spike (NPU とカメラの共存)
+### 7.1 方法
+
+Phase 0.5 の Vision pipeline (rpicam-apps + `hailo_yolov8_logger.json`、未変更) と、
+Milestone 7 の Qwen2-VL-2B-Instruct で、NPU とカメラの共存を実機で確認した
+(2026-10-02)。NPU とカメラを切り分けるため、VLM には事前に撮影した静止画を渡した。
+実験用スクリプトは `/tmp` に置き、リポジトリのコードは変更していない。
+
+### 7.2 結果
+
+| 実験 | 結果 |
+|---|---|
+| YOLO 実行中に VLM をロード | VLM の `VDevice` 作成が `HAILO_OUT_OF_PHYSICAL_DEVICES (74)` で失敗。YOLO は全区間約 30 fps で影響なし |
+| VLM がロード済みの状態で YOLO を起動 | rpicam-hello は stderr に `HailoRT not ready!` を出しつつ `exit=0` で動き続け、593 フレームすべて `"detections":[]` |
+| 上記の状態で VLM が NPU を解放 | 解放後 25 秒以上経っても検出は0件のまま (自然復帰しない)。`HailoRT not ready!` 1343 回 |
+| VLM の解放後に YOLO が Hailo を初期化 | 最初のフレームは解放の 0.739 秒後、正常に検出 |
+| YOLO 実行中に `rpicam-still` | `Pipeline handler in use by another process` で失敗 (exit 255)。YOLO は約 30 fps で影響なし |
+
+所要時間 (warm): VLM ロード約 10 秒 (起動直後の初回は約 31 秒)、推論約 4 秒、
+解放 (`release()`) 約 2.75 秒。rpicam-hello の起動から最初のフレームまで約 5 秒。
+温度 47〜50 ℃、throttling なし。
+
+### 7.3 原因 (ソース確認)
+
+* rpicam-apps の Hailo stage は `VDevice::create()` を既定パラメータで呼ぶ。HailoRT の
+  既定 group_id は `"UNIQUE"` で NPU を専有する
+* プロセス間共有には `multi_process_service` (HailoRT service) が必要だが、この環境には
+  HailoRT service が無い
+* rpicam-apps の vdevice はプロセス内シングルトンで、起動時の確保に失敗すると再試行しない
+* コミュニティ記事にあった環境変数 `HAILO_VDEVICE_GROUP_ID` は、公開されている HailoRT の
+  ソースには見当たらなかった
+
+### 7.4 わかったこと
+
+* 現行の rpicam-apps のままでは、YOLO と VLM は NPU を同時に使えない。カメラも同時に
+  使えないが、撮影の失敗は動作中の Vision に影響しない (Milestone 7 のレビューで残した
+  「Vision 実行中の Button 押下」は Vision に影響しない)
+* 常駐 worker / model resident は、待機中も NPU を専有するため連続 YOLO と両立しない
+* AI が NPU を保持している間に Vision が起動すると、Vision は検出0件を出し続け、
+  再起動するまで復帰しない。ADR 0008 で「正常な検出0件と推論失敗を区別できない」とした
+  制限が、実際の故障モードとして現れた
+* 現在の Runtime は Vision process を所有していない (シェルの pipe で stdin から受け取る)
+  ため、Runtime から Vision を停止・再開できない
+
+Milestone 9 (NPU Arbiter) の方式は Design Issue #9 で判断を仰いでいる。
+
+## 8. 次の課題
+
+* Design Issue #9 の判断後、Milestone 9 (NPU Arbiter Minimal Implementation)
 * Milestone 11: LCD の SPI clock (8 / 16 / 32 MHz) の比較 (Design Issue #8)
 * 5.3 の Button 表示が Vision に上書きされる挙動は、Button に対する UX を
   決める際に設計側で扱う
