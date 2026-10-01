@@ -48,6 +48,22 @@ class RuleBasedReasonerTest(unittest.TestCase):
             Decision(DecisionType.BUTTON_ACKNOWLEDGED),
         )
 
+    def test_button_pressed_requests_vlm_when_vlm_is_enabled(self):
+        reasoner = RuleBasedReasoner(vlm_enabled=True)
+
+        self.assertEqual(
+            reasoner.reason(RuntimeEvent("BUTTON_PRESSED")),
+            Decision(DecisionType.VLM_REQUESTED),
+        )
+
+    def test_vision_rules_are_unchanged_when_vlm_is_enabled(self):
+        reasoner = RuleBasedReasoner(vlm_enabled=True)
+
+        self.assertEqual(
+            reasoner.reason(observation("person")),
+            Decision(DecisionType.PERSON_DETECTED),
+        )
+
     def test_unknown_event_type_raises(self):
         with self.assertRaises(ValueError):
             self.reasoner.reason(RuntimeEvent("SOMETHING_ELSE"))

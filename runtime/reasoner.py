@@ -26,8 +26,12 @@ class Reasoner(Protocol):
 class RuleBasedReasoner:
     """person が1件でも存在すれば PERSON_DETECTED、なければ NO_PERSON。
 
-    Button press event は BUTTON_ACKNOWLEDGED とする。
+    Button press event は BUTTON_ACKNOWLEDGED とする。VLM が有効な場合は
+    VLM_REQUESTED とし、VLM Job を起動する (implementation plan #11.4)。
     """
+
+    def __init__(self, vlm_enabled: bool = False) -> None:
+        self._vlm_enabled = vlm_enabled
 
     def reason(self, input: ReasonerInput) -> Decision:
         if isinstance(input, Observation):
@@ -35,6 +39,8 @@ class RuleBasedReasoner:
                 return Decision(DecisionType.PERSON_DETECTED)
             return Decision(DecisionType.NO_PERSON)
         if isinstance(input, RuntimeEvent) and input.type == BUTTON_PRESSED:
+            if self._vlm_enabled:
+                return Decision(DecisionType.VLM_REQUESTED)
             return Decision(DecisionType.BUTTON_ACKNOWLEDGED)
         if isinstance(input, RuntimeEvent) and input.type == AI_RESULT:
             # Milestone 4 時点では AI Result の内容 (成功/失敗/timeout) を

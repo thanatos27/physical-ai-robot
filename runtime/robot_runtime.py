@@ -13,16 +13,25 @@ from __future__ import annotations
 import argparse
 import contextlib
 import logging
+import os
 import signal
 import sys
 import threading
 import time
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Iterator, Sequence
 
-from .action import ActionPlanner, ConsoleExecutor, Executor, HardwareExecutor
+from .action import (
+    ActionPlanner,
+    AIRequestExecutor,
+    ConsoleExecutor,
+    Executor,
+    HardwareExecutor,
+)
 from .adapters import DeviceUnavailableError, HardwareAdapter
+from .ai import AIJobManager, SubprocessAIBackend
 from .dispatch import DispatchingVisionSource, DispatchQueue
 from .event import RuntimeEvent
 from .input import InputSource, stdin_input_source
@@ -199,7 +208,40 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "none: Whisplay を使わない (Phase 0.5 と同じ console 出力のみ)。既定: auto"
         ),
     )
+    parser.add_argument(
+        "--ai",
+        default="none",
+        choices=["none", "vlm"],
+        help=(
+            "vlm: Button press で Hailo VLM Job を起動する (Milestone 7 暫定構成。"
+            "カメラを使うため連続 Vision とは同時に使わない)。"
+            "none: AI Job を使わない。既定: none"
+        ),
+    )
     return parser.parse_args(argv)
+
+
+# per-job subprocess は Job ごとにモデルをロードする (Qwen2-VL 実測 9.9 秒、
+# 撮影 / 推論を含め1 Job 十数秒)。初回の HEF 読み込みが遅い場合も考慮した値。
+VLM_JOB_TIMEOUT_SEC = 60.0
+VLM_BACKEND_NAME = "hailo-vlm-subprocess"
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_VLM_WORKER = _REPO_ROOT / "edge" / "vlm_worker" / "vlm_worker.py"
+_DEFAULT_GENAI_PYTHON = "~/venvs/hailo-apps/bin/python"
+_DEFAULT_VLM_HEF = "/usr/local/hailo/resources/models/hailo10h/Qwen2-VL-2B-Instruct.hef"
+
+
+def _open_vlm(dispatch: DispatchQueue) -> AIJobManager | None:
+    """VLM Job 用の AIJobManager を作る。前提が揃わなければ None (AI fallback, NFR-05)。"""
+    python = Path(os.path.expanduser(os.environ.get("HAILO_GENAI_PYTHON", _DEFAULT_GENAI_PYTHON)))
+    hef = Path(os.environ.get("VLM_HEF_PATH", _DEFAULT_VLM_HEF))
+    missing = [str(p) for p in (python, _VLM_WORKER, hef) if not p.exists()]
+    if missing:
+        logger.warning("VLM unavailable; continuing without AI Jobs (missing: %s)", ", ".join(missing))
+        return None
+    backend = SubprocessAIBackend([str(python), str(_VLM_WORKER), "--hef", str(hef)])
+    logger.info("VLM AI Job backend active (per-job subprocess)")
+    return AIJobManager(backend, dispatch.push_event)
 
 
 def _open_whisplay(dispatch: DispatchQueue) -> HardwareAdapter | None:
@@ -226,21 +268,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     hardware: HardwareAdapter | None = None
+    ai_manager: AIJobManager | None = None
     try:
         # Phase 0.8 Dispatch path (docs/specs/phase-0.8-implementation-plan.md
         # #Regression Boundary): Vision は State Coalescing を経由する。
         # raw DetectionEvent 数と RobotLoopRecord 数の一致は要求しない。
         vision_source = DispatchingVisionSource(stdin_input_source())
+        # Button press と AI Result は Vision と同じ Dispatch Queue へ投入される。
         if args.hardware == "auto":
-            # Button press は Vision と同じ Dispatch Queue へ投入される。
             hardware = _open_whisplay(vision_source.dispatch_queue)
+        if args.ai == "vlm":
+            ai_manager = _open_vlm(vision_source.dispatch_queue)
+
         executor: Executor = (
             HardwareExecutor(hardware) if hardware is not None else ConsoleExecutor()
         )
+        if ai_manager is not None:
+            executor = AIRequestExecutor(
+                executor, ai_manager, VLM_JOB_TIMEOUT_SEC, VLM_BACKEND_NAME
+            )
         runtime = RobotRuntime(
             input_source=vision_source,
             adapter=ObservationAdapter(),
-            reasoner=RuleBasedReasoner(),
+            reasoner=RuleBasedReasoner(vlm_enabled=ai_manager is not None),
             planner=ActionPlanner(),
             executor=executor,
             data_logger=JsonlRobotDataLogger(args.log_path or _default_log_path()),
@@ -251,8 +301,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         logger.exception("Robot Runtime failed")
         return 1
     finally:
-        if hardware is not None:
-            hardware.cleanup()
+        try:
+            # 実行中の VLM worker を終了・回収してから Whisplay を解放する (#15.3)。
+            if ai_manager is not None:
+                ai_manager.shutdown()
+        finally:
+            if hardware is not None:
+                hardware.cleanup()
     return 0
 
 

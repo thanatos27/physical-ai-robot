@@ -61,6 +61,7 @@ class DecisionType(str, Enum):
     PERSON_DETECTED = "PERSON_DETECTED"
     NO_PERSON = "NO_PERSON"
     BUTTON_ACKNOWLEDGED = "BUTTON_ACKNOWLEDGED"
+    VLM_REQUESTED = "VLM_REQUESTED"
     AI_RESULT_RECEIVED = "AI_RESULT_RECEIVED"
 
 
@@ -77,6 +78,8 @@ class ActionType(str, Enum):
     DISPLAY_MESSAGE = "DISPLAY_MESSAGE"
     SET_LED = "SET_LED"
     PLAY_AUDIO = "PLAY_AUDIO"
+    # AI Job (VLM) の投入要求 (Milestone 7)。message は受付表示に使う。
+    REQUEST_VLM = "REQUEST_VLM"
 
 
 @dataclass(frozen=True)

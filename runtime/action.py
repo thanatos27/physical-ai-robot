@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Protocol, TextIO
 
 from .adapters import DeviceUnavailableError, HardwareAdapter
+from .ai import AIJob, AIJobManager, AIJobType, new_job_id
 from .models import (
     Action,
     ActionResult,
@@ -30,6 +31,8 @@ _PLANS: dict[DecisionType, Action] = {
     DecisionType.BUTTON_ACKNOWLEDGED: Action(
         ActionType.DISPLAY_MESSAGE, "Button pressed"
     ),
+    # Button の既存表示を VLM Job の受付フィードバックとして使う (#11.4)。
+    DecisionType.VLM_REQUESTED: Action(ActionType.REQUEST_VLM, "Button pressed"),
     # Milestone 4: AI Result Event が Core まで届くことの最小限の proof。
     # 実際の AI 出力内容を表示する対応は Milestone 7 (AI Connectivity Proof)
     # で ActionPlanner に Decision の payload を持たせる際に拡張する。
@@ -159,3 +162,41 @@ class HardwareExecutor:
     def _set_device_status(self, device: str, status: DeviceStatus) -> None:
         with self._lock:
             self._device_status[device] = status
+
+
+class AIRequestExecutor:
+    """`REQUEST_VLM` を VLM Job として AIJobManager へ投入する (Milestone 7)。
+
+    それ以外の Action は delegate (HardwareExecutor / ConsoleExecutor) へ渡す。
+    Job の完了は待たず、結果は後続の AI_RESULT Event として Runtime へ戻る。
+    投入した job_id を ActionResult.detail に残し、要求した cycle と AI Result の
+    cycle を Robot Event Log 上で対応付けられるようにする (AC-21)。
+    """
+
+    def __init__(
+        self,
+        delegate: Executor,
+        manager: AIJobManager,
+        job_timeout: float,
+        backend_name: str,
+    ) -> None:
+        self._delegate = delegate
+        self._manager = manager
+        self._job_timeout = job_timeout
+        self._backend_name = backend_name
+
+    def execute(self, action: Action) -> ActionResult:
+        if action.type != ActionType.REQUEST_VLM:
+            return self._delegate.execute(action)
+
+        job = AIJob(
+            job_id=new_job_id(),
+            type=AIJobType.VLM,
+            backend=self._backend_name,
+            input=None,
+            timeout=self._job_timeout,
+        )
+        self._manager.submit(job)
+        # 受付フィードバック。表示の成否は Job 投入の結果に影響させない。
+        self._delegate.execute(Action(ActionType.DISPLAY_MESSAGE, action.message))
+        return ActionResult(ActionStatus.SUCCESS, f"job_id={job.job_id}")

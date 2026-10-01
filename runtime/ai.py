@@ -11,7 +11,9 @@ ai_job.py / ai_manager.py / npu_arbiter.py 等へ分割する (#9)。
 
 from __future__ import annotations
 
+import json
 import logging
+import subprocess
 import threading
 import time
 import uuid
@@ -65,8 +67,19 @@ class AIResult:
     detail: str | None = None
 
 
+class AIBackendTimeout(Exception):
+    """Backend 自身が timeout を検出し、worker を終了・回収したことを表す。"""
+
+
 class AIBackend(Protocol):
-    def run(self, job: AIJob) -> object: ...
+    def run(self, job: AIJob) -> object:
+        """Job を実行して出力を返す。戻った時点で NPU を使う処理は終了している
+        こと (#15.3)。timeout は `AIBackendTimeout` で知らせる。"""
+        ...
+
+    def shutdown(self) -> None:
+        """実行中の処理を終了させる。Runtime 停止時に呼ばれる。"""
+        ...
 
 
 class FakeAIBackend:
@@ -98,6 +111,81 @@ class FakeAIBackend:
         if job.job_id in self._fail_job_ids:
             raise RuntimeError(f"fake backend failure for job {job.job_id}")
         return self._default_output
+
+    def shutdown(self) -> None:
+        pass
+
+
+class SubprocessAIBackend:
+    """Job ごとに worker process を起動する実 Backend (#15.3, Milestone 7)。
+
+    worker は stdout の最後の行に JSON object を1つ出力して終了する契約とし、
+    その object を AI Result の output とする。timeout / shutdown 時は worker を
+    terminate / kill し、wait (reap) まで完了してから戻る。これにより
+    `AIJobManager` は前 Job の worker が終了してから次 Job を開始できる。
+
+    worker 側は hailo-apps venv の Python で実行し、Runtime プロセスには
+    hailo_platform / OpenCV 等の依存を持ち込まない。
+    """
+
+    _TERMINATE_GRACE_SEC = 5.0
+    _STDERR_TAIL = 500
+
+    def __init__(self, command: list[str]) -> None:
+        self._command = list(command)
+        self._lock = threading.Lock()
+        self._procs: set[subprocess.Popen] = set()
+
+    def run(self, job: AIJob) -> object:
+        proc = subprocess.Popen(
+            self._command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        with self._lock:
+            self._procs.add(proc)
+        try:
+            try:
+                stdout, stderr = proc.communicate(timeout=job.timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()  # reap
+                raise AIBackendTimeout(
+                    f"worker killed after {job.timeout:g}s (pid={proc.pid})"
+                ) from None
+        finally:
+            with self._lock:
+                self._procs.discard(proc)
+
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"worker exited with {proc.returncode}: "
+                f"{stderr.strip()[-self._STDERR_TAIL:]}"
+            )
+        return _parse_worker_output(stdout)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            procs = list(self._procs)
+        for proc in procs:
+            proc.terminate()
+        for proc in procs:
+            try:
+                proc.wait(timeout=self._TERMINATE_GRACE_SEC)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+
+def _parse_worker_output(stdout: str) -> object:
+    # HailoRT 等のライブラリが stdout へログを出す可能性があるため、
+    # 最後の JSON object 行を結果とする。
+    for line in reversed(stdout.strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            return json.loads(line)
+    raise RuntimeError(f"worker produced no JSON result: {stdout.strip()[-200:]!r}")
 
 
 class NpuResourceState(str, Enum):
@@ -140,6 +228,7 @@ class AIJobManager:
         self._lock = threading.Lock()
         self._type_state: dict[AIJobType, _TypeState] = {}
         self._running_job_ids: set[str] = set()
+        self._shutting_down = False
 
     def npu_state(self) -> NpuResourceState:
         with self._lock:
@@ -162,6 +251,9 @@ class AIJobManager:
 
     def submit(self, job: AIJob) -> None:
         with self._lock:
+            if self._shutting_down:
+                logger.warning("AI Job rejected during shutdown: %s", job.job_id)
+                return
             state = self._type_state.setdefault(job.type, _TypeState())
             if state.running is None:
                 state.running = job
@@ -173,40 +265,56 @@ class AIJobManager:
         if start_now:
             self._start(job)
 
+    def shutdown(self) -> None:
+        """新規 Job と pending Job を破棄し、実行中の backend 処理を終了させる。
+
+        shutdown 後は AI_RESULT Event を出さない (Runtime は既に停止している)。
+        """
+        with self._lock:
+            self._shutting_down = True
+            for state in self._type_state.values():
+                state.pending = None
+        self._backend.shutdown()
+
     def _start(self, job: AIJob) -> None:
         state_lock = threading.Lock()
-        finalized = False
+        reported = False
         timer_holder: list[threading.Timer] = []
 
-        def finalize(result: AIResult) -> None:
-            nonlocal finalized
+        def report(result: AIResult) -> None:
+            # timeout と backend 完了の競合で二重に Event を出さない。
+            nonlocal reported
             with state_lock:
-                if finalized:
-                    return  # timeout と正常完了の競合を防ぎ、二重に Event を出さない。
-                finalized = True
+                if reported:
+                    return
+                reported = True
             if timer_holder:
                 timer_holder[0].cancel()
+            with self._lock:
+                if self._shutting_down:
+                    return
             self._push_event(RuntimeEvent(AI_RESULT, payload=result))
-            self._on_job_finished(job)
 
         def worker() -> None:
             try:
                 output = self._backend.run(job)
+            except AIBackendTimeout as exc:
+                logger.warning("AI Job timeout (backend): %s (%s)", job.job_id, exc)
+                report(AIResult(job.job_id, job.type, AIJobStatus.TIMEOUT, detail=str(exc)))
             except Exception as exc:  # noqa: BLE001 - Event 経由で伝える
                 logger.warning("AI Job failed: %s (%s)", job.job_id, exc)
-                finalize(
-                    AIResult(job.job_id, job.type, AIJobStatus.FAILED, detail=str(exc))
-                )
-                return
-            finalize(
-                AIResult(job.job_id, job.type, AIJobStatus.COMPLETED, output=output)
-            )
+                report(AIResult(job.job_id, job.type, AIJobStatus.FAILED, detail=str(exc)))
+            else:
+                report(AIResult(job.job_id, job.type, AIJobStatus.COMPLETED, output=output))
+            finally:
+                # backend が戻った = NPU を使う処理が終了した後でのみ実行枠を解放し、
+                # 次の pending Job を開始する (#15.3)。timeout を検出した時点では
+                # 解放しない。
+                self._on_job_finished(job)
 
         def on_timeout() -> None:
             logger.warning("AI Job timeout: %s", job.job_id)
-            finalize(
-                AIResult(job.job_id, job.type, AIJobStatus.TIMEOUT, detail="timeout")
-            )
+            report(AIResult(job.job_id, job.type, AIJobStatus.TIMEOUT, detail="timeout"))
 
         timer = threading.Timer(job.timeout, on_timeout)
         timer.daemon = True
@@ -220,7 +328,7 @@ class AIJobManager:
             state = self._type_state[job.type]
             state.running = None
             self._running_job_ids.discard(job.job_id)
-            if state.pending is not None:
+            if state.pending is not None and not self._shutting_down:
                 next_job = state.pending
                 state.pending = None
                 state.running = next_job
