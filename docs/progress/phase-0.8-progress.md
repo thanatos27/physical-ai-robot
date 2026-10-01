@@ -487,11 +487,72 @@ Milestone 7 の Qwen2-VL-2B-Instruct で、NPU とカメラの共存を実機で
 * 現在の Runtime は Vision process を所有していない (シェルの pipe で stdin から受け取る)
   ため、Runtime から Vision を停止・再開できない
 
-Milestone 9 (NPU Arbiter) の方式は Design Issue #9 で判断を仰いでいる。
+Milestone 9 (NPU Arbiter) の方式は Design Issue #9 で判断を仰いだ (8章)。
 
-## 8. 次の課題
+## 8. Milestone 9 --- NPU Arbiter Minimal Implementation
 
-* Design Issue #9 の判断後、Milestone 9 (NPU Arbiter Minimal Implementation)
-* Milestone 11: LCD の SPI clock (8 / 16 / 32 MHz) の比較 (Design Issue #8)
+### 8.1 決定 (Design Issue #9)
+
+Option D (Vision 動作中は AI Job を実行しない排他ポリシー) を採用した。ただし NPU の
+状態を Vision の受信間隔から推定する方式は採らず、起動時に明示したモードで管理する。
+`NpuArbiter` は OS / HailoRT レベルのロックではなく、Runtime 管理下の NPU Job に対する
+admission control / resource visibility とする。
+
+Vision process の lifecycle 管理 (停止 / 再開 / health check)、Vision と AI の自動
+モード切替、HailoRT service による共有、rpicam-apps の Hailo stage の置き換え、
+priority scheduling / preemption は Phase 0.8 では実装しない。自動切替には Vision の
+推論状態を判定できる信号が前提になるため、別の Design Issue / ADR で扱う。
+
+### 8.2 実装 (`7a6041c`)
+
+* `--npu-mode {vision,ai}` (既定 `vision`)
+* `NpuArbiter`: `vision` では状態を `VISION` に固定し AI Job を拒否する。`ai` では
+  `FREE -> EXCLUSIVE_AI -> FREE` を管理し、worker の回収後に `FREE` に戻す。遷移は
+  Application Log に記録する
+* 拒否した Job は worker を起動せず、理由付きの AI Result (`REJECTED`) を返す。
+  要求 cycle と同じ `job_id` で Robot Event Log から追跡できる
+* `EXCLUSIVE_AI` の間は Job Type が異なる Job も拒否する (AC-NPU-01)。Milestone 4 では
+  異なる type を同時に実行していたため、該当する自動テストを新しい仕様に合わせて更新した
+* VLM を使う場合は `--ai vlm --npu-mode ai` と指定する
+
+自動テストは開発 PC で 131 件パスした (Pillow 未導入のため1件 skip)。
+
+### 8.3 実機確認 (2026-10-02)
+
+```bash
+# vision モード (Vision 実行中に Button)
+rpicam-hello -t 30000 \
+  --post-process-file edge/detection_logger/hailo_yolov8_logger.json \
+  --nopreview | python3 -m runtime.robot_runtime --ai vlm --log-path /tmp/m9_vision.jsonl
+
+# ai モード (Vision なし)
+python3 -m runtime.robot_runtime --ai vlm --npu-mode ai --log-path /tmp/m9_ai.jsonl
+```
+
+* **vision モード:** 起動時に `NPU mode: vision (state=VISION)`。Button 押下の直後に
+  `AI Job rejected: ... (NPU is reserved for VISION (--npu-mode vision))` が出力され、
+  worker は起動しなかった。要求 cycle (53) と同じ `job_id` の AI Result (`REJECTED`、
+  理由付き) が cycle 55 に記録された。Vision は止まらず、30秒後に正常終了した
+* **ai モード:** 起動時に `NPU mode: ai (state=FREE)`。Button 押下で
+  `NPU FREE -> EXCLUSIVE_AI`、Job 完了・worker 回収後に `NPU EXCLUSIVE_AI -> FREE`
+  (約18.9秒後)。同じ `job_id` の AI Result (`COMPLETED`) が記録された
+
+### 8.4 制限 / 未確認
+
+* Runtime の外で手動起動された `rpicam-hello` 等による NPU の利用は防げない。AI の
+  実行中に Vision を起動すると、7.4 の「検出0件を出し続ける」故障が起こり得る
+* AI Result は内容に関係なく LCD に `AI result received` と表示するため、`REJECTED`
+  も LCD 上では区別できない (ログでは区別できる)
+* vision モードの確認時、Vision の処理件数は約30秒で 480 件 (約16件/秒) で、Issue #8 の
+  確認時 (674 件) より少なかった。人の検出の切り替わりが多く、8 MHz での LCD 描画が
+  増えたためと考えられるが、切り替わり回数は計測していない
+
+## 9. 次の課題
+
+* Milestone 10: Regression / Automated Verification (Raspberry Pi 上での自動テスト実行を含む)
+* Milestone 11: Real-device Acceptance。LCD の SPI clock (8 / 16 / 32 MHz) の比較
+  (Design Issue #8) を含む
+* Vision の推論状態を判定する信号 (ADR 0008 の将来課題) と NPU mode management の
+  自動切替 (Design Issue #9 で将来課題とした)
 * 5.3 の Button 表示が Vision に上書きされる挙動は、Button に対する UX を
   決める際に設計側で扱う
