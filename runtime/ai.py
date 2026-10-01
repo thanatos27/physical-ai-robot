@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import signal
 import subprocess
 import threading
 import time
@@ -137,25 +139,32 @@ class SubprocessAIBackend:
         self._command = list(command)
         self._lock = threading.Lock()
         self._procs: set[subprocess.Popen] = set()
+        self._closed = False
 
     def run(self, job: AIJob) -> object:
-        proc = subprocess.Popen(
-            self._command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            # 端末の Ctrl+C (SIGINT) を worker に直接届けない。実機で、推論中の
-            # HailoRT が SIGINT による EINTR で abort した。worker の停止は
-            # Runtime が terminate / kill で管理する (#15.3)。
-            start_new_session=True,
-        )
+        # 「閉じているかの確認 → 起動 → 登録」を1つの lock の中で行う。shutdown が
+        # 生成直後・登録前の worker を見落とすことや、shutdown 後に新しい worker を
+        # 起動することを防ぐ (PR #10 review [P1])。
         with self._lock:
+            if self._closed:
+                raise RuntimeError("AI backend is shut down; worker not started")
+            proc = subprocess.Popen(
+                self._command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                # 端末の Ctrl+C (SIGINT) を worker に直接届けない。実機で、推論中の
+                # HailoRT が SIGINT による EINTR で abort した。worker の停止は
+                # Runtime が管理する (#15.3)。worker は新しいプロセスグループの
+                # リーダーになるため、停止はグループ単位で行える。
+                start_new_session=True,
+            )
             self._procs.add(proc)
         try:
             try:
                 stdout, stderr = proc.communicate(timeout=job.timeout)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                self._signal_group(proc, force=True)
                 proc.communicate()  # reap
                 raise AIBackendTimeout(
                     f"worker killed after {job.timeout:g}s (pid={proc.pid})"
@@ -173,9 +182,10 @@ class SubprocessAIBackend:
 
     def shutdown(self) -> None:
         with self._lock:
+            self._closed = True
             procs = list(self._procs)
         for proc in procs:
-            proc.terminate()
+            self._signal_group(proc, force=False)
         for proc in procs:
             # worker はモデルロード等の native 呼び出し中は SIGTERM にすぐ応答できない。
             # 止まって見えないよう待機を通知し、待機中の Ctrl+C は即時 kill として扱う。
@@ -187,9 +197,38 @@ class SubprocessAIBackend:
             try:
                 proc.wait(timeout=self._TERMINATE_GRACE_SEC)
             except (subprocess.TimeoutExpired, KeyboardInterrupt):
-                proc.kill()
+                self._signal_group(proc, force=True)
                 proc.wait()
                 logger.info("AI worker killed (pid=%d)", proc.pid)
+            # worker 本体が終わっても、SIGTERM に応じない子 (rpicam-still 等) が
+            # グループに残り得るため、最後にグループ全体を強制終了する。
+            self._kill_remaining_group(proc)
+
+    def _signal_group(self, proc: subprocess.Popen, force: bool) -> None:
+        """worker とその子 (撮影用の rpicam-still 等) をまとめて停止する
+        (PR #10 review [P2])。
+
+        worker は start_new_session=True で起動しているため、POSIX では
+        プロセスグループ ID が worker の PID と一致する。プロセスグループの無い
+        環境 (開発 PC の Windows) では worker 本体だけを停止する。
+        """
+        if os.name == "posix":
+            try:
+                os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        elif force:
+            proc.kill()
+        else:
+            proc.terminate()
+
+    def _kill_remaining_group(self, proc: subprocess.Popen) -> None:
+        if os.name != "posix":
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def _parse_worker_output(stdout: str) -> object:

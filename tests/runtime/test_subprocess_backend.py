@@ -111,6 +111,10 @@ class SubprocessAIBackendShutdownTest(unittest.TestCase):
     def _backend_with(self, proc):
         backend = SubprocessAIBackend(["unused"])
         backend._procs.add(proc)
+        # FakeProc の pid は実在しないため、os.killpg を呼ばないよう差し替える
+        # (Raspberry Pi 上で無関係なプロセスグループへ送らないため)。
+        backend._signal_group = lambda p, force: p.kill() if force else p.terminate()
+        backend._kill_remaining_group = lambda p: p.calls.append("kill_group")
         return backend
 
     def test_unresponsive_worker_is_killed_after_grace_period(self):
@@ -124,7 +128,13 @@ class SubprocessAIBackendShutdownTest(unittest.TestCase):
 
         self.assertEqual(
             proc.calls,
-            ["terminate", ("wait", SubprocessAIBackend._TERMINATE_GRACE_SEC), "kill", ("wait", None)],
+            [
+                "terminate",
+                ("wait", SubprocessAIBackend._TERMINATE_GRACE_SEC),
+                "kill",
+                ("wait", None),
+                "kill_group",
+            ],
         )
         self.assertIn("Stopping AI worker", "\n".join(logs.output))
 
@@ -135,8 +145,184 @@ class SubprocessAIBackendShutdownTest(unittest.TestCase):
         with self.assertLogs("runtime.ai", level="INFO"):
             backend.shutdown()  # KeyboardInterrupt を外へ出さない
 
-        self.assertIn("kill", proc.calls)
-        self.assertEqual(proc.calls[-1], ("wait", None))
+        self.assertEqual(proc.calls[-3:], ["kill", ("wait", None), "kill_group"])
+
+
+class SubprocessAIBackendSpawnRaceTest(unittest.TestCase):
+    """PR #10 review [P1]: worker の起動・登録と shutdown を同期する。"""
+
+    def test_run_after_shutdown_does_not_start_a_worker(self):
+        from unittest import mock
+
+        backend = SubprocessAIBackend(python("import time; time.sleep(30)"))
+        backend.shutdown()
+
+        with mock.patch("runtime.ai.subprocess.Popen") as popen:
+            with self.assertRaisesRegex(RuntimeError, "shut down"):
+                backend.run(job())
+
+        popen.assert_not_called()
+
+    def test_shutdown_during_spawn_waits_for_registration_and_stops_the_worker(self):
+        import subprocess
+        from unittest import mock
+
+        real_popen = subprocess.Popen
+        spawned = threading.Event()
+        proceed = threading.Event()
+        created = []
+
+        def slow_popen(*args, **kwargs):
+            # 生成直後・登録前で止め、その間に shutdown を呼ぶ。
+            proc = real_popen(*args, **kwargs)
+            created.append(proc)
+            spawned.set()
+            proceed.wait(timeout=10)
+            return proc
+
+        backend = SubprocessAIBackend(python("import time; time.sleep(30)"))
+        errors = []
+
+        def run():
+            try:
+                backend.run(job(timeout=30))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        with mock.patch("runtime.ai.subprocess.Popen", side_effect=slow_popen):
+            runner = threading.Thread(target=run)
+            runner.start()
+            self.assertTrue(spawned.wait(timeout=10))
+
+            stopper = threading.Thread(target=backend.shutdown)
+            stopper.start()
+            time.sleep(0.3)
+            # 登録が終わるまで shutdown は lock で待たされ、worker を見落とさない。
+            self.assertTrue(stopper.is_alive())
+
+            proceed.set()
+            stopper.join(timeout=15)
+            runner.join(timeout=15)
+
+        self.assertFalse(stopper.is_alive())
+        self.assertFalse(runner.is_alive())
+        self.assertIsNotNone(created[0].poll())  # worker は停止・回収済み
+        self.assertEqual(len(errors), 1)
+
+
+class AIJobManagerShutdownRaceTest(unittest.TestCase):
+    """PR #10 review [P1]: pending Job の選択から _start() までの間に shutdown が
+    来ても、worker を起動しない。"""
+
+    def test_pending_job_selected_before_shutdown_does_not_start_a_worker(self):
+        import subprocess
+        from unittest import mock
+
+        from runtime.ai import AIJobManager
+
+        real_popen = subprocess.Popen
+        popen_calls = []
+
+        def counting_popen(*args, **kwargs):
+            popen_calls.append(args)
+            return real_popen(*args, **kwargs)
+
+        # first が実行中に second を submit して pending にするため、first の worker は
+        # すぐには終わらないようにする。
+        backend = SubprocessAIBackend(
+            python('import time; time.sleep(0.5); print(\'{"output": "x"}\')')
+        )
+        manager = AIJobManager(backend, lambda event: None)
+        original_start = manager._start
+        second_selected = threading.Event()
+        shutdown_done = threading.Event()
+
+        def start(next_job):
+            if next_job is not first:
+                # _on_job_finished() が pending Job を選んだ直後で止め、shutdown を待つ。
+                second_selected.set()
+                shutdown_done.wait(timeout=10)
+            original_start(next_job)
+
+        first = job(timeout=10)
+        second = job(timeout=10)
+        with mock.patch("runtime.ai.subprocess.Popen", side_effect=counting_popen), \
+                mock.patch.object(manager, "_start", side_effect=start):
+            manager.submit(first)
+            manager.submit(second)  # pending
+            self.assertTrue(second_selected.wait(timeout=10))
+
+            manager.shutdown()
+            shutdown_done.set()
+            time.sleep(0.5)
+
+        self.assertEqual(len(popen_calls), 1)  # first の worker だけ
+
+
+GRANDCHILD_WORKER = """
+import pathlib, subprocess, sys, time
+child = subprocess.Popen(
+    [sys.executable, "-c",
+     "import pathlib, sys, time; time.sleep(1.5); pathlib.Path(sys.argv[1]).write_text('alive')",
+     {marker!r}],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+pathlib.Path({started!r}).write_text(str(child.pid))
+time.sleep(30)
+"""
+
+
+@unittest.skipUnless(hasattr(__import__("os"), "killpg"), "process groups require POSIX")
+class SubprocessAIBackendChildProcessTest(unittest.TestCase):
+    """PR #10 review [P2]: worker が起動した子 (撮影用の rpicam-still 等) も停止する。"""
+
+    def _backend(self, tmp):
+        from pathlib import Path
+
+        marker = Path(tmp) / "child_survived"
+        started = Path(tmp) / "child_started"
+        code = GRANDCHILD_WORKER.format(marker=str(marker), started=str(started))
+        return SubprocessAIBackend(python(code)), marker, started
+
+    def _wait_for(self, path, timeout=10.0):
+        deadline = time.monotonic() + timeout
+        while not path.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return path.exists()
+
+    def test_shutdown_stops_the_workers_children(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backend, marker, started = self._backend(tmp)
+            runner = threading.Thread(target=lambda: self._run_ignoring_errors(backend, 30))
+            runner.start()
+            self.assertTrue(self._wait_for(started))
+
+            backend.shutdown()
+            runner.join(timeout=15)
+            time.sleep(2.5)  # 子が生きていれば 1.5 秒後に marker を作る
+
+            self.assertFalse(marker.exists())
+
+    def test_timeout_stops_the_workers_children(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backend, marker, started = self._backend(tmp)
+
+            with self.assertRaises(AIBackendTimeout):
+                backend.run(job(timeout=1.0))
+            self.assertTrue(started.exists())
+            time.sleep(2.5)
+
+            self.assertFalse(marker.exists())
+
+    @staticmethod
+    def _run_ignoring_errors(backend, timeout):
+        try:
+            backend.run(job(timeout=timeout))
+        except Exception:  # noqa: BLE001
+            pass
 
 
 if __name__ == "__main__":
