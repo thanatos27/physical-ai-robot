@@ -171,11 +171,19 @@ class SubprocessAIBackend:
         for proc in procs:
             proc.terminate()
         for proc in procs:
+            # worker はモデルロード等の native 呼び出し中は SIGTERM にすぐ応答できない。
+            # 止まって見えないよう待機を通知し、待機中の Ctrl+C は即時 kill として扱う。
+            logger.info(
+                "Stopping AI worker (pid=%d, up to %gs; press Ctrl+C again to kill)",
+                proc.pid,
+                self._TERMINATE_GRACE_SEC,
+            )
             try:
                 proc.wait(timeout=self._TERMINATE_GRACE_SEC)
-            except subprocess.TimeoutExpired:
+            except (subprocess.TimeoutExpired, KeyboardInterrupt):
                 proc.kill()
                 proc.wait()
+                logger.info("AI worker killed (pid=%d)", proc.pid)
 
 
 def _parse_worker_output(stdout: str) -> object:

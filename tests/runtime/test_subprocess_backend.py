@@ -72,5 +72,61 @@ class SubprocessAIBackendTest(unittest.TestCase):
         self.assertIsInstance(errors[0], RuntimeError)
 
 
+class FakeProc:
+    """terminate に応答しない worker (native 呼び出し中) を模擬する。"""
+
+    pid = 4242
+
+    def __init__(self, wait_side_effect):
+        self.calls = []
+        self._wait_side_effect = list(wait_side_effect)
+
+    def terminate(self):
+        self.calls.append("terminate")
+
+    def kill(self):
+        self.calls.append("kill")
+
+    def wait(self, timeout=None):
+        self.calls.append(("wait", timeout))
+        if self._wait_side_effect:
+            effect = self._wait_side_effect.pop(0)
+            if effect is not None:
+                raise effect
+        return 0
+
+
+class SubprocessAIBackendShutdownTest(unittest.TestCase):
+    def _backend_with(self, proc):
+        backend = SubprocessAIBackend(["unused"])
+        backend._procs.add(proc)
+        return backend
+
+    def test_unresponsive_worker_is_killed_after_grace_period(self):
+        import subprocess
+
+        proc = FakeProc([subprocess.TimeoutExpired("worker", 5), None])
+        backend = self._backend_with(proc)
+
+        with self.assertLogs("runtime.ai", level="INFO") as logs:
+            backend.shutdown()
+
+        self.assertEqual(
+            proc.calls,
+            ["terminate", ("wait", SubprocessAIBackend._TERMINATE_GRACE_SEC), "kill", ("wait", None)],
+        )
+        self.assertIn("Stopping AI worker", "\n".join(logs.output))
+
+    def test_second_ctrl_c_during_wait_kills_without_raising(self):
+        proc = FakeProc([KeyboardInterrupt(), None])
+        backend = self._backend_with(proc)
+
+        with self.assertLogs("runtime.ai", level="INFO"):
+            backend.shutdown()  # KeyboardInterrupt を外へ出さない
+
+        self.assertIn("kill", proc.calls)
+        self.assertEqual(proc.calls[-1], ("wait", None))
+
+
 if __name__ == "__main__":
     unittest.main()
