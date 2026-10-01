@@ -250,9 +250,94 @@ rpicam-hello -t 30000 \
 * Internet 接続なしでの Core 動作 (AC-29)
 * Raspberry Pi 上での自動テスト実行 (Milestone 10)
 
-## 6. 次の課題
+## 6. Milestone 7 --- AI Connectivity Proof (疎通確認)
 
-* Milestone 7: AI Connectivity Proof (STT / LLM / VLM)
+### 6.1 使用したもの
+
+公式の情報・サンプルを確認してから実施した (推測で API / モデルを決めない)。
+
+* API: `hailo_platform.genai` (`VLM` / `LLM` / `Speech2Text`)。システムの
+  `python3-h10-hailort 5.1.1` に含まれており、追加インストールは不要だった
+* サンプル: Hailo 公式 hailo-apps 26.03.1 の `simple_vlm_chat` /
+  `simple_llm_chat` / `simple_whisper_chat`
+  (https://github.com/hailo-ai/hailo-apps)。26.03.1 は Hailo-10H の
+  HailoRT 5.1.1 対応を明記している
+* モデル: Hailo GenAI Model Zoo **v5.1.1** の HEF
+  (https://github.com/hailo-ai/hailo_model_zoo_genai/blob/v5.1.1/docs/MODELS.rst)
+
+### 6.2 導入手順
+
+システムの HailoRT を上書きしないよう、hailo-apps は venv
+(`--system-site-packages`) へ入れた。hailo-apps の pip 依存に `hailort` は
+含まれず、導入後も `hailo_platform` はシステム側
+(`/usr/lib/python3/dist-packages`) から読み込まれることを確認した。
+
+```bash
+sudo apt install -y portaudio19-dev python3-dev python3-gi
+git clone --depth 1 --branch 26.03.1 https://github.com/hailo-ai/hailo-apps.git
+python3 -m venv --system-site-packages ~/venvs/hailo-apps
+source ~/venvs/hailo-apps/bin/activate
+pip install --upgrade pip
+cd ~/hailo-apps
+pip install -e ".[gen-ai]"
+
+sudo mkdir -p /usr/local/hailo/resources/packages
+sudo chown -R $USER:$USER /usr/local/hailo
+mkdir -p /usr/local/hailo/resources/models/hailo10h
+cd /usr/local/hailo/resources/models/hailo10h
+wget -c https://dev-public.hailo.ai/v5.1.1/blob/Whisper-Base.hef
+wget -c https://dev-public.hailo.ai/v5.1.1/blob/Qwen2.5-1.5B-Instruct.hef
+wget -c https://dev-public.hailo.ai/v5.1.1/blob/Qwen2-VL-2B-Instruct.hef
+```
+
+モデルを `hailo-download-resources` ではなく直接取得した理由:
+
+* `hailo-download-resources` は Model Zoo のバージョンを **v5.1.0** と解決し、
+  `Qwen2.5-1.5B-Instruct.hef` が 404 になった (v5.1.1 で追加されたモデル)
+* `--dry-run` を付けても実際にダウンロードしており、中断すると
+  `.<name>.hef.<random>.tmp` が残った (2.0 GB、手動で削除)
+
+### 6.3 実機確認 (Raspberry Pi 5 + AI HAT+ 2 + Whisplay、2026-10-01)
+
+カメラ / Runtime を止めた状態で実行した。
+
+```bash
+cd ~/hailo-apps
+M=/usr/local/hailo/resources/models/hailo10h
+python -m hailo_apps.python.gen_ai_apps.simple_whisper_chat.simple_whisper_chat --hef-path $M/Whisper-Base.hef
+python -m hailo_apps.python.gen_ai_apps.simple_llm_chat.simple_llm_chat --hef-path $M/Qwen2.5-1.5B-Instruct.hef
+python -m hailo_apps.python.gen_ai_apps.simple_vlm_chat.simple_vlm_chat --hef-path $M/Qwen2-VL-2B-Instruct.hef
+```
+
+* **同梱入力:** Whisper は `What is the temperature today?`、LLM は短い
+  ジョーク、VLM は `There is one person in the image.` を返した
+* **AC-EXT-01 (Mic → STT):** Whisplay マイクで5秒録音
+  (`arecord -D whisplaysound -f S16_LE -r 48000 -c 2`、`sox` で 16 kHz /
+  モノラルへ変換) し、Whisper-Base で文字起こしできた。ロード込みで約2.3秒
+* **AC-EXT-02 (Camera Image → VLM):** `rpicam-still` で撮影した1枚を
+  Qwen2-VL-2B-Instruct へ渡し、`A computer mouse and a smartphone are placed
+  on a table with a patterned cloth.` を得た (iPhone を写しており内容は妥当)。
+  ロード 9.9 秒、推論 3.0 秒。公式サンプルは画像パスが固定のため、同じ API
+  呼び出しで画像パスだけ引数にした使い捨てスクリプトで実施した
+* **AC-EXT-03 (prompt → LLM):** Qwen2.5-1.5B-Instruct が応答を返した
+
+### 6.4 観測した挙動と制限
+
+* STT の精度が低い。"Hello robot, what do you see?" と英語で話したところ
+  `Caron robot, but they see.` となった。原因 (Whisper-Base のモデル規模、
+  マイクとの距離・入力レベル、発音等) は未切り分け
+* 公式サンプルの Whisper は `language="en"` 固定。日本語での確認は未実施
+
+### 6.5 未確認 / 未着手
+
+* AC-EXT-04 (AI Result を Runtime へ戻し Display または Log で利用):
+  実行方式、カメラの所有権、起動トリガー、表示方法が仕様だけでは決められない
+  ため、Design Issue #6 で判断を仰いでいる
+* VLM と Vision (YOLO) の NPU / カメラ共存 (Milestone 8)
+
+## 7. 次の課題
+
+* Design Issue #6 の判断後、AC-EXT-04 (AI Result の Runtime 統合) を実装する
 * Milestone 8: Hailo YOLO / VLM Coexistence Spike
 * 5.3 の Button 表示が Vision に上書きされる挙動は、Button に対する UX を
   決める際に設計側で扱う
