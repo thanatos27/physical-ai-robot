@@ -376,9 +376,13 @@ class MainWhisplayTest(unittest.TestCase):
         return exit_code, stdout.getvalue().splitlines()
 
     def test_auto_falls_back_to_console_when_whisplay_driver_is_missing(self):
+        # Raspberry Pi 上では本物の whisplay_client が sys.path から見え得るため、
+        # 隔離しないと実機の Whisplay を初期化してしまう (Milestone 10)。
+        from tests.runtime.test_whisplay_adapter import isolated_driver_import
+
         with tempfile.TemporaryDirectory() as empty_dir, mock.patch.dict(
             "os.environ", {"WHISPLAY_DRIVER_DIR": empty_dir}
-        ):
+        ), isolated_driver_import():
             with self.assertLogs("runtime.robot_runtime", level="WARNING") as logs:
                 exit_code, console = self._run_main(["--hardware", "auto"])
 

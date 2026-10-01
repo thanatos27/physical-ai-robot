@@ -5,6 +5,8 @@ PiSugar の `whisplay_client` は実機 (Raspberry Pi + Whisplay HAT) 上にし�
 動作確認は Real-device Verification として別途行う (AGENTS.md)。
 """
 
+import contextlib
+import os
 import sys
 import tempfile
 import types
@@ -53,6 +55,27 @@ class FakeBoard:
         self._record("cleanup")
 
 
+@contextlib.contextmanager
+def isolated_driver_import(module=None):
+    """本物の PiSugar whisplay_client から隔離する。
+
+    Raspberry Pi 上では ~/Whisplay/runtime に本物の whisplay_client.py があり、
+    sys.path から見えると自動テストが実機の Whisplay を初期化してしまう
+    (Milestone 10 で Pi 上の実行時に発生)。テストの間だけ、whisplay_client.py を
+    含むディレクトリを sys.path から除き、読み込み済みのモジュールも外す。
+    module を渡した場合は、それを whisplay_client として使わせる。
+    """
+    path = [
+        p for p in sys.path
+        if not os.path.isfile(os.path.join(p or os.getcwd(), "whisplay_client.py"))
+    ]
+    with mock.patch.object(sys, "path", path), mock.patch.dict(sys.modules):
+        sys.modules.pop("whisplay_client", None)
+        if module is not None:
+            sys.modules["whisplay_client"] = module
+        yield
+
+
 def fake_client(board=None, raises=None):
     module = types.ModuleType("whisplay_client")
 
@@ -62,7 +85,7 @@ def fake_client(board=None, raises=None):
         return board
 
     module.create_whisplay_hardware = create_whisplay_hardware
-    return mock.patch.dict(sys.modules, {"whisplay_client": module})
+    return isolated_driver_import(module)
 
 
 class RealWhisplayAdapterTest(unittest.TestCase):
@@ -121,8 +144,7 @@ class RealWhisplayAdapterTest(unittest.TestCase):
     def test_missing_driver_is_device_unavailable(self):
         with tempfile.TemporaryDirectory() as empty_dir, mock.patch.dict(
             "os.environ", {"WHISPLAY_DRIVER_DIR": empty_dir}
-        ), mock.patch.dict(sys.modules):
-            sys.modules.pop("whisplay_client", None)
+        ), isolated_driver_import():
             with self.assertRaises(DeviceUnavailableError):
                 RealWhisplayAdapter(DispatchQueue())
 
