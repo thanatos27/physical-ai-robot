@@ -26,9 +26,32 @@ Observe → Reason → Action → Log
 
 ## Current Phase
 
+### Phase 0.8 — Stationary AI Robot
+
+Raspberry Pi 5 + AI HAT+ 2 + Camera Module 3 Wide に Whisplay HAT (LCD / Button / RGB LED / Speaker / Microphone) を追加し、Phase 0.5 の Robot Runtime を拡張した。
+
+```text
+Vision (rpicam-apps / Hailo YOLO) ──┐
+Whisplay Button ────────────────────┼→ Dispatch Queue → Robot Runtime (同期 Core)
+AI Result (Hailo VLM, per-job) ─────┘        Observation / Event → Reason → Action → Log
+                                                            ↓
+                                              Whisplay LCD / LED、Robot Event Log
+```
+
+実装と実機での受け入れ確認 (Milestone 0〜11) を終え、Implementation Review の段階にある。Phase の完了判断は未了。
+
+* 実機で確認済み: Vision E2E、Button E2E、Whisplay の各 I/O、Button → VLM → AI Result の記録、NPU の調停、30 分連続稼働での温度、オフライン動作
+* 自動テスト: 開発 PC と Raspberry Pi で 131 件パス
+* 既知の課題: AI HAT+ 2 上に Whisplay を積層した構成で LCD 表示が不安定になる (ノイズ、長時間稼働での表示停止)。Issue #8 でハードウェア側の改善を検討中
+* YOLO と VLM は NPU を同時に使えないため、`--npu-mode` で明示的に切り替える (ADR 0011)
+
+詳細な進捗・実機確認結果・未確認事項：
+
+`docs/progress/phase-0.8-progress.md`
+
 ### Phase 0.5 — Robot Runtime
 
-現在は Raspberry Pi 5 + AI HAT+ 2 + Camera Module 3 Wide を使用。
+Raspberry Pi 5 + AI HAT+ 2 + Camera Module 3 Wide を使用。
 
 以下の Observe → Reason → Action → Log の基本ループは実機で動作確認済み。
 
@@ -58,22 +81,39 @@ Detection JSONをObservationとして受け取る Robot Runtime は `runtime/`�
 
 `docs/progress/phase-0.5-progress.md`
 
-### Robot Runtime の実行(開発中)
+### Robot Runtime の実行
 
-リポジトリルートで、Detection JSONL を標準入力から与える。
+リポジトリルートで実行する。
 
 ```bash
-# 保存済みJSONL(fixture)の再生
-python3 -m runtime.robot_runtime < tests/fixtures/detections_sample.jsonl
+# 保存済みJSONL(fixture)の再生 (Whisplay を使わない)
+python3 -m runtime.robot_runtime --hardware none < tests/fixtures/detections_sample.jsonl
 
-# Raspberry Pi 上でカメラ入力を接続
+# Raspberry Pi 上でカメラ入力を接続 (Vision E2E。Whisplay があれば LCD / LED にも表示)
 rpicam-hello -t 10000 \
-  --post-process-file ~/detection-logger/hailo_yolov8_logger.json \
+  --post-process-file edge/detection_logger/hailo_yolov8_logger.json \
   --nopreview | python3 -m runtime.robot_runtime
+
+# Vision を使わず、Button で Hailo VLM を起動する (Phase 0.8 の AI 構成)
+python3 -m runtime.robot_runtime --ai vlm --npu-mode ai
 ```
 
-* Robot Data Log は既定で `logs/robot-data-<UTC日時>.jsonl` に保存される(`--log-path` で変更可)
-* Application Log は stderr、Actionのコンソール出力は stdout
+| オプション | 既定 | 内容 |
+|---|---|---|
+| `--hardware {auto,none}` | `auto` | `auto` は Whisplay を使い、使えなければ console 出力のみで継続する |
+| `--ai {none,vlm}` | `none` | `vlm` は Button press で VLM Job を起動する (前提: `edge/vlm_worker/README.md`) |
+| `--npu-mode {vision,ai}` | `vision` | `vision` は NPU を Vision に予約し AI Job を拒否する。`ai` は AI Job が NPU を排他的に使う |
+| `--log-path` | `logs/robot-data-<UTC日時>.jsonl` | Robot Event Log (JSONL、schema v0.2) の保存先 |
+
+| 環境変数 | 既定 | 内容 |
+|---|---|---|
+| `WHISPLAY_DRIVER_DIR` | `~/Whisplay/runtime` | PiSugar Whisplay driver (`whisplay_client.py`) の場所 |
+| `WHISPLAY_SPI_HZ` | `8000000` | LCD の SPI clock (暫定。Issue #8 で再評価中) |
+| `HAILO_GENAI_PYTHON` | `~/venvs/hailo-apps/bin/python` | VLM worker を実行する Python |
+| `VLM_HEF_PATH` | `/usr/local/hailo/resources/models/hailo10h/Qwen2-VL-2B-Instruct.hef` | VLM のモデル |
+
+* Application Log は stderr、Action のコンソール出力は stdout
+* Whisplay / VLM の導入手順は `docs/progress/phase-0.8-progress.md` の第4章・第6章を参照
 * テスト: `python3 -m unittest discover -s tests -t .`
 
 Raspberry Pi 5 実機での E2E 確認(`docs/specs/phase-0.5-robot-runtime.md` の AC-08)は完了している。結果は `docs/progress/phase-0.5-progress.md` の第14章を参照。

@@ -1,6 +1,6 @@
 # Physical AI Robot Project --- Phase 0.8 開発進捗
 
-更新日: 2026-10-01
+更新日: 2026-10-02
 
 ## 1. 目的
 
@@ -730,13 +730,102 @@ Rule Reason / Whisplay (Button、LCD) / Log が動作し、`exit=0` で終了し
 | AC-JOB-01 | 自動テスト | 9.3 |
 | AC-EXT-01〜04 | 実機 OK | 6.3、6.6 (STT の精度に課題) |
 
-## 11. 次の課題
+## 11. Phase 0.8 の整理 (Milestone 12)
 
+Phase の完了判断は設計側で行う (`docs/development/workflow.md`)。ここでは判断材料を整理する。
+
+### 11.1 現在の構成
+
+Hardware:
+
+* Raspberry Pi 5 8GB、Active Cooler、27W USB-C Power Supply、microSDXC 128GB
+* Raspberry Pi AI HAT+ 2 (Hailo-10H)
+* Raspberry Pi Camera Module 3 Wide
+* PiSugar Whisplay HAT (WM8960 コーデック版)。AI HAT+ 2 の GPIO stacking header 上に積層
+
+Software:
+
+* Robot Runtime (`runtime/`、Python 標準ライブラリのみ)
+* `detection_logger` (`edge/detection_logger/`、Phase 0.5 から変更なし)
+* VLM worker (`edge/vlm_worker/`、hailo-apps venv で実行)
+* 外部依存 (リポジトリには含めない): PiSugar Whisplay driver (`~/Whisplay`)、hailo-apps
+  26.03.1 (`~/venvs/hailo-apps`)、Hailo GenAI Model Zoo v5.1.1 の HEF
+  (`/usr/local/hailo/resources/models/hailo10h/`)
+* HailoRT 5.1.1 / TAPPAS 5.1.0 はシステムパッケージのまま (Phase 0.5 から変更なし)
+
+実行方法は `README.md`、導入手順は本書 4.2 (Whisplay) と 6.2 (hailo-apps / モデル) を参照。
+
+### 11.2 技術判断
+
+* ADR 0009: FIFO Dispatch + State Coalescing、回帰の境界 (legacy path / Dispatch path)
+* ADR 0010: AI Job を per-job subprocess で実行 (Phase 0.8 の暫定方式)
+* ADR 0011: NPU を明示的なモードで管理 (`--npu-mode`)
+* 継続中: Design Issue #8 (Whisplay 積層時の LCD 表示)
+
+### 11.3 結果のまとめ
+
+* Automated Test: 開発 PC / Raspberry Pi とも 131 件パス (9.1)
+* Real-device Test: Acceptance Criteria の状況は 10.6。AC-12 (LCD) のみ条件付き
+
+### 11.4 既知の制限
+
+* 積層構成で LCD にノイズが出ることがあり、長時間稼働で表示が止まることがある (10.1 /
+  10.2、Issue #8)。LCD を初期化し直すと復帰する
+* YOLO (rpicam-apps) と VLM は NPU を同時に使えない。`--npu-mode` で明示的に切り替える。
+  Runtime の外で起動された `rpicam-hello` は防げず、AI の実行中に Vision を起動すると
+  検出0件を出し続ける (7.4、ADR 0011)
+* Dispatch path では Vision の中間フレームの処理を保証しない (ADR 0009)
+* Vision 実行中は、Button の表示がすぐ Vision の表示で上書きされる (5.3)
+* AI Result は内容に関係なく LCD に `AI result received` と表示し、`REJECTED` も区別
+  できない (8.4)
+* VLM は Job ごとにモデルをロードするため、1 Job に十数秒かかる (起動直後の初回は
+  約 31 秒のロード) (6.6)
+* LCD 描画1回あたり Core が約 0.18 秒 (8 MHz) 止まる (10.1)
+* STT の精度が低い。英語でのみ確認した (6.4)
+* Event 型 cycle の `timestamp` は Runtime の処理時刻で、Vision の検出時刻とは意味が異なる
+
+### 11.5 未確認
+
+* Runtime の `PLAY_AUDIO` Action を実機で再生すること (Speaker 自体は 4.4 / 4.5 で確認)
+* STT / LLM の Runtime への組み込み (Milestone 7 で組み込んだのは VLM のみ)
+* 継続不能時の終了で、cleanup により LED が消灯すること (10.4。自動テストでは確認済み)
+* Button を押してから処理されるまでの遅れそのもの (10.3)
+* vision モードの確認時に Vision の処理件数が少なかった理由 (8.4)
+* 処理件数の減少と LCD 描画時間の関係 (6.8 の訂正)
+* LCD の SPI clock の最終値と、ハードウェア改善後の長時間稼働 (Issue #8)
+* 30 分を超える連続稼働
+
+### 11.6 Technical Debt
+
+* `RealWhisplayAdapter` は PiSugar の非公開メソッド (`_reset_lcd` / `_init_display`) に
+  依存し、ドライバの場所を `sys.path` に追加したまま戻さない
+* PiSugar Whisplay driver の clone は特定の commit を記録していない (2026-10-01 時点の
+  `--depth 1`)。hailo-apps は tag 26.03.1 を使用
+* `hailo-download-resources` は Model Zoo のバージョンを v5.1.0 と解決するため、v5.1.1 の
+  HEF を公式 URL から手動で取得している (6.2)
+* LCD の文字描画と RGB565 変換を Python で行っており、1回約 48 ms かかる (10.1)
+* `Decision` が内容を持たないため、AI の出力文を表示する Action を作れない
+* Vision の推論状態 (正常な検出0件と推論失敗の区別) を示す信号が無い (ADR 0008 / 0011)
+* `runtime/ai.py` は1ファイル構成 (責務が増えた時点で分割する方針)
+* 自動テストの一部は `time.sleep` による待ち合わせに依存している
+
+### 11.7 Phase 1 への課題
+
+* NPU mode management: Vision の停止・再開と AI の自動切替。前提として Vision の推論
+  状態を判定できる信号が要る (ADR 0011)
+* 判定の安定化: 1〜2 フレームの検出0件による判定のちらつき (Phase 0.5 15.4)。LCD の
+  描画量 (10.2) にも影響している
+* ハードウェアの積層 / 固定の改善 (Issue #8)。Motor 等を追加する前に物理構成を安定させる
+* Motor 等の物理 Actuator を扱う際の安全要件 (Emergency Stop、Watchdog 等)
+* AI Result の内容を Reason で使うこと、STT の組み込み、日本語での認識
+
+## 12. 次の課題
+
+* Implementation PR (`implementation/phase-0.8` → `main`) の Implementation Review (Codex)
 * Design Issue #8: ハードウェア側の積層 / 固定の改善と、改善後の 8 / 16 / 32 MHz の
   再評価 (長時間稼働での表示停止の有無を含む)。ソフトウェア側の LCD 高頻度更新の抑制の
   検討
-* Milestone 12: Documentation / Progress (ADR、README / AGENTS の Current Phase、
-  Implementation PR)
+* Phase 0.8 の完了判断 (設計側)
   (Design Issue #8) を含む
 * Vision の推論状態を判定する信号 (ADR 0008 の将来課題) と NPU mode management の
   自動切替 (Design Issue #9 で将来課題とした)
