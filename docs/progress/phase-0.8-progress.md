@@ -625,8 +625,17 @@ Phase 0.8 で追加したテストのうち、Milestone 4 の「異なる Job Ty
 
 LCD のノイズ (目視) は、1 回目は 16 / 32 MHz、2 回目はなし、3 回目は 8 / 16 MHz で
 出た。**8 MHz でも再発し、速度を下げても無くならない。** Design Issue #8 の
-「8 MHz でも表示異常が再発する場合はハードウェア側の対策を検討する」に該当したため、
-Issue #8 に結果を記録し、方針の判断を仰いでいる。
+「8 MHz でも表示異常が再発する場合はハードウェア側の対策を検討する」に該当した。
+
+**Design Issue #8 の再 Open と追加判断:**
+
+* 8 MHz は最終解決策とみなさず、SPI clock は未確定に戻す (コードの既定値 8 MHz は
+  ハードウェア改善後の再評価まで変更しない)
+* ハードウェア側の積層 / 固定の改善 (stacking header、spacer 等) を主対策とし、改善後に
+  8 / 16 / 32 MHz を再評価する。安定性が同程度なら描画時間の短い 32 MHz を第一候補とする
+* ソフトウェア側では LCD の高頻度更新を抑制する方向を検討する
+* 周期的な LCD 再初期化は根本対策ではなく Recovery 策として扱う
+* Issue #8 はハードウェア改善後の再評価まで継続する
 
 ### 10.2 30 分連続稼働 (AC-02 / AC-28)
 
@@ -723,8 +732,9 @@ Rule Reason / Whisplay (Button、LCD) / Log が動作し、`exit=0` で終了し
 
 ## 11. 次の課題
 
-* Design Issue #8 の追加判断 (Hardware 側対策の進め方、暫定 SPI clock、ソフトウェア側の
-  緩和策の要否)
+* Design Issue #8: ハードウェア側の積層 / 固定の改善と、改善後の 8 / 16 / 32 MHz の
+  再評価 (長時間稼働での表示停止の有無を含む)。ソフトウェア側の LCD 高頻度更新の抑制の
+  検討
 * Milestone 12: Documentation / Progress (ADR、README / AGENTS の Current Phase、
   Implementation PR)
   (Design Issue #8) を含む
