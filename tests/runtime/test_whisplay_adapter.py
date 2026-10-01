@@ -138,5 +138,102 @@ class RealWhisplayAdapterTest(unittest.TestCase):
         self.assertIn(("draw_image", 0, 0, 4, 2, 16), board.calls)
 
 
+class RecordingSpi:
+    def __init__(self, board):
+        self._board = board
+        self._hz = 100_000_000
+
+    @property
+    def max_speed_hz(self):
+        return self._hz
+
+    @max_speed_hz.setter
+    def max_speed_hz(self, hz):
+        self._board.calls.append(("spi_speed", hz))
+        self._hz = hz
+
+
+class FakeDirectBoard(FakeBoard):
+    """PiSugar WhisplayBoard (直接制御) を模擬: spi と LCD 初期化メソッドを持つ。"""
+
+    def __init__(self, fail=None):
+        super().__init__(fail)
+        self.spi = RecordingSpi(self)
+
+    def _reset_lcd(self):
+        self._record("reset_lcd")
+
+    def _init_display(self):
+        self._record("init_display")
+
+    def fill_screen(self, color):
+        self._record("fill_screen", color)
+
+
+class WhisplaySpiSpeedTest(unittest.TestCase):
+    """Design Issue #8: LCD の SPI クロックを暫定 8 MHz にし、その速度で再初期化する。"""
+
+    def _open(self, board, env=None):
+        environ = {k: v for k, v in (env or {}).items()}
+        with fake_client(board), mock.patch.dict("os.environ", environ):
+            if "WHISPLAY_SPI_HZ" not in environ:
+                import os
+
+                os.environ.pop("WHISPLAY_SPI_HZ", None)
+            return RealWhisplayAdapter(DispatchQueue())
+
+    def test_default_is_8mhz_and_lcd_is_reinitialized_before_backlight(self):
+        board = FakeDirectBoard()
+
+        self._open(board)
+
+        self.assertEqual(board.spi.max_speed_hz, 8_000_000)
+        self.assertEqual(
+            board.calls[:5],
+            [
+                ("spi_speed", 8_000_000),
+                ("reset_lcd",),
+                ("init_display",),
+                ("fill_screen", 0),
+                ("set_backlight", 70),
+            ],
+        )
+
+    def test_env_overrides_speed_for_milestone_11_comparison(self):
+        board = FakeDirectBoard()
+
+        self._open(board, {"WHISPLAY_SPI_HZ": "16000000"})
+
+        self.assertEqual(board.spi.max_speed_hz, 16_000_000)
+
+    def test_invalid_env_falls_back_to_default(self):
+        board = FakeDirectBoard()
+
+        with self.assertLogs("runtime.adapters.whisplay", level="WARNING") as logs:
+            self._open(board, {"WHISPLAY_SPI_HZ": "fast"})
+
+        self.assertEqual(board.spi.max_speed_hz, 8_000_000)
+        self.assertIn("Invalid WHISPLAY_SPI_HZ", "\n".join(logs.output))
+
+    def test_daemon_mode_without_spi_warns_and_continues(self):
+        board = FakeBoard()  # spi を持たない (WhisplayDaemonProxy 相当)
+
+        with self.assertLogs("runtime.adapters.whisplay", level="WARNING") as logs:
+            adapter = self._open(board)
+
+        self.assertIn("not accessible", "\n".join(logs.output))
+        adapter.set_led("RED")
+        self.assertIn(("set_rgb", 255, 0, 0), board.calls)
+
+    def test_reinit_failure_is_not_fatal(self):
+        board = FakeDirectBoard(fail={"init_display"})
+
+        with self.assertLogs("runtime.adapters.whisplay", level="WARNING") as logs:
+            self._open(board)
+
+        self.assertIn("re-initialization failed", "\n".join(logs.output))
+        self.assertIn(("set_backlight", 70), board.calls)
+
+
 if __name__ == "__main__":
     unittest.main()

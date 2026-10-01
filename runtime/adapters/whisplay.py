@@ -32,6 +32,11 @@ BUTTON_PRESSED = "BUTTON_PRESSED"
 AUDIO_DEVICE = "whisplaysound"
 
 _DEFAULT_WHISPLAY_RUNTIME_DIR = os.path.expanduser("~/Whisplay/runtime")
+
+# AI HAT+ 2 上に積層すると、PiSugar 既定の 100 MHz では LCD 表示が不安定になる
+# ことがあるため、暫定で 8 MHz とする (Design Issue #8)。Milestone 11 で
+# 8 / 16 / 32 MHz を比較して最終値を決めるまで、WHISPLAY_SPI_HZ で上書きできる。
+DEFAULT_SPI_SPEED_HZ = 8_000_000
 _BACKGROUND = (10, 14, 22)
 _FOREGROUND = (255, 255, 255)
 
@@ -47,6 +52,22 @@ LED_COLORS: dict[str, tuple[int, int, int]] = {
 
 def whisplay_runtime_dir() -> str:
     return os.environ.get("WHISPLAY_DRIVER_DIR", _DEFAULT_WHISPLAY_RUNTIME_DIR)
+
+
+def spi_speed_hz() -> int:
+    raw = os.environ.get("WHISPLAY_SPI_HZ")
+    if raw is None:
+        return DEFAULT_SPI_SPEED_HZ
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        logger.warning(
+            "Invalid WHISPLAY_SPI_HZ=%r; using %d", raw, DEFAULT_SPI_SPEED_HZ
+        )
+        return DEFAULT_SPI_SPEED_HZ
+    return value
 
 
 def _import_create_whisplay_hardware() -> Callable[..., object]:
@@ -101,12 +122,49 @@ class RealWhisplayAdapter:
             raise DeviceUnavailableError(f"failed to acquire Whisplay board: {exc}") from exc
 
         self._dispatch = dispatch
+        self._configure_spi(spi_speed_hz())
         try:
             self._board.set_backlight(backlight)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Whisplay set_backlight failed: %s", exc)
 
         self._board.on_button_press(self._on_button_press)
+
+    def _configure_spi(self, hz: int) -> None:
+        """LCD の SPI クロックを設定し、その速度で LCD を初期化し直す (Design Issue #8)。
+
+        PiSugar の WhisplayBoard は生成時に既定 (100 MHz) で LCD を初期化するため、
+        積層時はその初期化自体が化けている可能性がある。速度を下げた後に
+        初期化し直す。初期化には PiSugar の非公開メソッドを使う (実機で 8 MHz の
+        安定を確認した診断と同じ呼び出し)。
+        """
+        spi = getattr(self._board, "spi", None)
+        if spi is None:
+            # whisplay-daemon 経由 (WhisplayDaemonProxy) では SPI を daemon が持つ。
+            logger.warning("Whisplay SPI is not accessible (daemon mode?); speed not set")
+            return
+        try:
+            spi.max_speed_hz = hz
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to set Whisplay SPI speed to %d Hz: %s", hz, exc)
+            return
+
+        reset = getattr(self._board, "_reset_lcd", None)
+        init = getattr(self._board, "_init_display", None)
+        if reset is None or init is None:
+            logger.warning(
+                "Whisplay LCD re-initialization is unavailable; "
+                "LCD was initialized at the driver default speed"
+            )
+            return
+        try:
+            reset()
+            init()
+            self._board.fill_screen(0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Whisplay LCD re-initialization failed: %s", exc)
+            return
+        logger.info("Whisplay LCD SPI speed: %d Hz", hz)
 
     def _on_button_press(self) -> None:
         self._dispatch.push_event(RuntimeEvent(BUTTON_PRESSED))
