@@ -41,7 +41,7 @@ AI Result (Hailo VLM, per-job) ─────┘        Observation / Event →
 実装と実機での受け入れ確認 (Milestone 0〜11) を終え、Implementation Review の段階にある。Phase の完了判断は未了。
 
 * 実機で確認済み: Vision E2E、Button E2E、Whisplay の各 I/O、Button → VLM → AI Result の記録、NPU の調停、30 分連続稼働での温度、オフライン動作
-* 自動テスト: 開発 PC と Raspberry Pi で 131 件パス
+* 自動テスト: 開発 PC と Raspberry Pi で 136 件パス
 * 既知の課題: AI HAT+ 2 上に Whisplay を積層した構成で LCD 表示が不安定になる (ノイズ、長時間稼働での表示停止)。Issue #8 でハードウェア側の改善を検討中
 * YOLO と VLM は NPU を同時に使えないため、`--npu-mode` で明示的に切り替える (ADR 0011)
 

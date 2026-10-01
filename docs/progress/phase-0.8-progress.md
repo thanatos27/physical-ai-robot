@@ -605,6 +605,26 @@ Phase 0.8 で追加したテストのうち、Milestone 4 の「異なる Job Ty
 テストの間だけ `whisplay_client.py` を含むディレクトリを `sys.path` から除き、読み込み
 済みのモジュールも外す `isolated_driver_import` を追加して修正した (`01a108e`)。
 
+### 9.5 Implementation Review (PR #10、Codex) で見つかり修正した問題
+
+* **[P1] worker の起動と shutdown の競合:** `Popen()` が lock の外で実行されていたため、
+  生成から登録までの間に shutdown が走ると worker を見落とし、shutdown 後の起動も拒否
+  できなかった。`AIJobManager` の `submit()` / `_on_job_finished()` から `_start()` までの
+  間に shutdown が来た場合も同様。Runtime の終了後も worker が残り、NPU を保持し続ける
+  可能性があった → backend に closed 状態を持たせ、「closed の確認 → 起動 → 登録」を
+  1つの lock の中で行うよう修正した
+* **[P2] 撮影用の子プロセスの残存:** terminate / kill の対象が worker 本体だけで、撮影用の
+  `rpicam-still` 等が残り、カメラを保持し続ける可能性があった → POSIX では worker の
+  プロセスグループ全体を停止し、最後にグループ全体を強制終了するよう修正した。開発 PC
+  (Windows) では worker 本体だけを停止する
+
+修正は `b8b6ad0`。待ち合わせを制御した回帰テストを5件追加した。P1 の3件は修正前の
+コードで失敗することを開発 PC で確認した。P2 の2件 (POSIX のみ) は Raspberry Pi で
+パスしたが、修正前のコードで失敗することは確認していない。
+
+修正後の自動テスト: 開発 PC 136 件パス (Pillow 未導入の1件と POSIX 専用の2件を skip)、
+Raspberry Pi 136 件パス (skip なし、実機の Whisplay の初期化 0 回)。
+
 ## 10. Milestone 11 --- Real-device Acceptance
 
 実機確認日: 2026-10-02 (Raspberry Pi 5 + AI HAT+ 2 + Whisplay HAT、積層構成)
@@ -764,7 +784,8 @@ Software:
 
 ### 11.3 結果のまとめ
 
-* Automated Test: 開発 PC / Raspberry Pi とも 131 件パス (9.1)
+* Automated Test: 開発 PC / Raspberry Pi とも 136 件パス (Implementation Review の指摘
+  対応後、9.5)
 * Real-device Test: Acceptance Criteria の状況は 10.6。AC-12 (LCD) のみ条件付き
 
 ### 11.4 既知の制限
