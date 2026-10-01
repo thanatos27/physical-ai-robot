@@ -646,6 +646,25 @@ AI Result Producer ───────────────┘
 
 State 通知と Event の間に明示的な優先順位は設けず、Dispatch Queue への enqueue 順で処理する。
 
+### 15.3 Milestone 7 provisional Hailo execution policy
+
+Milestone 7 の実 Hailo Backend 統合では、`hailo_platform.genai` の native call を Runtime process 内で直接実行せず、Job ごとの subprocess を暫定方式として採用する。
+
+```text
+Runtime Core
+    ↓
+AI Job Manager
+    ↓
+per-job subprocess
+    ↓
+hailo_platform.genai
+```
+
+AI worker は hailo-apps 用 venv の Python で起動し、Runtime Core 側には OpenCV / hailo-apps 等の依存を持ち込まない。
+
+timeout / failure / shutdown 時は worker process の終了を要求し、必要に応じて kill したうえで wait / reap まで完了させる。前 Job の worker が終了したことを確認するまでは、同じ NPU を利用する次の pending Job を開始しない。
+
+この subprocess 方式は Milestone 7 の Connectivity Proof を安全に成立させるための暫定方式であり、Phase 0.8 の恒久的な AI worker architecture として確定しない。常駐 worker、model resident、YOLO との concurrent execution 等は Milestone 8 の実機検証結果をもとに判断する。
 実装時には以下を確認する。
 
 - 現行 `stdin_input_source` と複数 Event Source の統合方法
@@ -738,6 +757,23 @@ YOLO stop
 
 この実機検証結果によって NPU Arbiter の具体実装を確定する。
 
+### 16.4 Camera Ownership
+
+連続 Vision Pipeline の実行中は `rpicam-apps` が Camera を所有するため、on-demand VLM 用の単一画像取得も ownership 問題を持つ。
+
+Milestone 7 の Connectivity Proof では、連続 Vision を停止した状態で Button を契機に VLM Job を起動し、worker が単一画像を取得する方式を許容する。これは Camera 共存方式の最終決定ではない。
+
+Milestone 8 では NPU ownership に加えて Camera ownership も実機検証対象とする。
+
+確認対象:
+
+- 連続 YOLO 実行中に VLM 用 frame を取得できるか
+- Camera device ownership conflict が発生するか
+- 既存 Vision Pipeline から frame を共有する必要があるか
+- Vision stop / capture / restart が必要か
+- VLM 終了後に Vision Pipeline が正常復帰するか
+
+Camera / NPU の lifecycle coordination は、Milestone 8 の実測結果が得られるまで作り込まない。
 ---
 
 ## 17. Backpressure
