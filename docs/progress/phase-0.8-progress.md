@@ -328,16 +328,99 @@ python -m hailo_apps.python.gen_ai_apps.simple_vlm_chat.simple_vlm_chat --hef-pa
   マイクとの距離・入力レベル、発音等) は未切り分け
 * 公式サンプルの Whisper は `language="en"` 固定。日本語での確認は未実施
 
-### 6.5 未確認 / 未着手
+### 6.5 Runtime 統合 (AC-EXT-04) の実装
 
-* AC-EXT-04 (AI Result を Runtime へ戻し Display または Log で利用):
-  実行方式、カメラの所有権、起動トリガー、表示方法が仕様だけでは決められない
-  ため、Design Issue #6 で判断を仰いでいる
-* VLM と Vision (YOLO) の NPU / カメラ共存 (Milestone 8)
+実行方式・カメラの所有権・起動トリガー・表示方法は仕様だけでは決められない
+ため Design Issue #6 で判断を仰ぎ、PR #7 で暫定方針が確定した
+(spec #15.3 / #16.4、implementation plan #11.4)。
+
+```text
+Whisplay Button → VLM_REQUESTED → REQUEST_VLM (受付表示 "Button pressed")
+  → AIJobManager → SubprocessAIBackend (per-job subprocess)
+  → edge/vlm_worker (hailo-apps venv: rpicam-still 1枚 → Qwen2-VL → JSON)
+  → AI_RESULT Event → Robot Event Log (event.payload)
+```
+
+* `edge/vlm_worker/vlm_worker.py`: hailo-apps venv の Python で動く worker。
+  Runtime 本体は標準ライブラリのみを維持する
+* `SubprocessAIBackend`: Job ごとに worker を起動し、timeout / shutdown 時は
+  terminate / kill して reap してから戻る
+* `AIJobManager`: timeout の Event は即時に出すが、次の pending Job は worker が
+  終了するまで開始しない
+* `AIRequestExecutor`: Job を投入し、投入した `job_id` を `ActionResult.detail`
+  に残す。要求した cycle と AI Result の cycle を Log 上で対応付けられる
+* `--ai {none,vlm}` (既定 `none`)。Vision 実行中のカメラ共有は未検証のため
+  明示指定時のみ有効。前提 (venv の Python / worker / HEF) が無ければ AI なしで
+  継続する。VLM 出力文の LCD 表示は Milestone 7 では行わない
+
+### 6.6 実機確認 (Raspberry Pi 5 + AI HAT+ 2 + Whisplay、2026-10-01〜02)
+
+実行 (リポジトリルートで、連続 Vision は止めた状態):
+
+```bash
+python3 -m runtime.robot_runtime --ai vlm --log-path /tmp/m7_vlm3.jsonl
+```
+
+* **AC-EXT-04:** Button 押下で `VLM_REQUESTED` の cycle が記録され、十数秒後に
+  `AI_RESULT` (`COMPLETED`) の cycle が記録された。両者の `job_id` が一致し、
+  `event.payload.output` に説明文と所要時間が記録された
+* **受付表示:** LCD が `Button pressed` → `AI result received` と切り替わった
+* **Backpressure:** 2秒以内に3回押すと、実行中1件 + pending 1件となり、
+  2件目は3件目に置き換えられ実行されなかった (AI Result は2件)
+* **失敗時:** カメラ未接続時は worker が `rpicam-still failed: ... no cameras
+  available` で失敗し、理由が AI Result の `detail` に記録された。Runtime は
+  停止しなかった
+* **Job 実行中の Ctrl+C:** `Stopping AI worker (pid=...)` の後、worker は
+  SIGTERM で約0.05秒で終了し (`-15`)、Runtime は正常終了した。worker は残らず、
+  直後の worker 単体実行も成功し NPU が解放されていることを確認した
+* **所要時間:** 起動直後の最初の Job だけロードが約31秒、以降は約9.9秒
+  (撮影 約1.3秒、推論 約3〜9秒)。最初の1回は HEF がページキャッシュに無いため
+  と考えられる。Runtime 側の timeout (60秒) には最初の1回でも約20秒の余裕がある
+
+### 6.7 実機確認で見つかり修正した問題
+
+* **停止待ちの無表示:** worker はモデルロード中に SIGTERM へすぐ応答できず、
+  shutdown の待機が無表示で止まって見えた。そこで2回目の Ctrl+C を押すと
+  traceback で異常終了した → 待機をログに出し、待機中の Ctrl+C は即時 kill と
+  して扱うよう修正 (`b4e6d2a`)
+* **HailoRT の abort:** Job 実行中の Ctrl+C で、端末の SIGINT が worker にも
+  届き、HailoRT の `poll` が EINTR で中断されて abort した (`buffer overflow
+  detected`、SIGABRT)。NPU はプロセス終了後に再利用できた → worker を別セッション
+  で起動し端末の SIGINT を届けないようにし、Python の SIGTERM ハンドラ (native
+  の待機を EINTR で中断させる) を削除した (`f3619a8`)
+
+### 6.8 Whisplay 積層時の LCD 不安定 (Design Issue #8)
+
+Milestone 7 の作業中の再起動後、公式 `test.py` を含め LCD に描画されなくなった
+(バックライトのみ点灯)。切り分けの結果:
+
+* 起動設定 (`config.txt` は 19:27 から未変更)、電源 (`throttled=0x0`)、ピン設定
+  (`pinctrl`)、Runtime のコードは原因ではない
+* AI HAT+ 2 を外して Whisplay を Pi に直接載せると安定した
+* AI HAT+ 2 を戻して丁寧に積層し直すと概ね動作したが、SPI 100 / 32 MHz で
+  ときどき下部に太い線のノイズが出た。8 MHz ではノイズを観測していない
+  (PiSugar の既定は 100 MHz)
+
+積層の嵌合状態で LCD がほぼ使えなくなり、正しく嵌合していても高速 SPI の余裕が
+小さいと考えられる。対策 (SPI クロックを下げる / ハードウェア側の対策等) は
+Design Issue #8 で判断を仰いでいる。
+
+AI HAT+ 2 の付け外しの際にカメラの FFC ケーブルが外れ、再接続後の再起動で
+認識が戻った (CSI カメラは起動時にのみ検出される)。AI HAT+ 2 は再装着後も
+HAILO10H (FW 5.1.1) として認識されている。
+
+### 6.9 未確認
+
+* VLM と Vision (YOLO) の NPU / カメラ共存、Vision 実行中に Button を押した
+  場合の影響 (Milestone 8)
+* 種類の異なる AI Job (STT / LLM / VLM) を同時に実 NPU で実行した場合
+  (Milestone 7 で統合したのは VLM のみ。Milestone 8 / 9)
+* STT 精度の改善、日本語での認識 (6.4)
+* LCD 積層問題の恒久対策 (Design Issue #8)
 
 ## 7. 次の課題
 
-* Design Issue #6 の判断後、AC-EXT-04 (AI Result の Runtime 統合) を実装する
-* Milestone 8: Hailo YOLO / VLM Coexistence Spike
+* Design Issue #8 (Whisplay 積層時の LCD) の方針確定と対応
+* Milestone 8: Hailo YOLO / VLM Coexistence Spike (NPU とカメラの共存)
 * 5.3 の Button 表示が Vision に上書きされる挙動は、Button に対する UX を
   決める際に設計側で扱う
