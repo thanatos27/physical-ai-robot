@@ -420,11 +420,13 @@ PiSugar の非公開メソッド (`_reset_lcd` / `_init_display`) を使う。
 * Button E2E、Vision E2E とも LCD にノイズ・欠けは無かった
 * Vision E2E (30秒) の処理件数は 674 件 (約22.5件/秒、PERSON_DETECTED 288、
   NO_PERSON 386)。Milestone 6 (100 MHz) の 887 件より約213件少ない
-* 表示の切り替わりは 53 回。8 MHz での1画面 (240x280、RGB565) の描画は約0.13秒で、
-  53 回 × 約0.13秒 ≒ 約6.9秒 ≒ 30fps で約207フレーム分となり、処理件数の減少を
-  ほぼ説明できる。描画中に届いた Vision は State Coalescing で最新値にまとめられる
-  ため backlog は溜まらず、Core の停止は1回あたり約0.13秒 (AC-27 の数秒単位の
-  遅延には当たらない)
+* 表示の切り替わりは 53 回。描画中に届いた Vision は State Coalescing で最新値に
+  まとめられるため backlog は溜まらない
+* **訂正 (Milestone 11):** 当初、8 MHz の1画面描画を約0.13秒 (SPI 転送時間のみの
+  理論値) とし、「53 回 × 約0.13秒 ≒ 約207フレーム分で処理件数の減少をほぼ説明
+  できる」と記録した。Milestone 11 で実測した描画時間は約0.18秒 (10.1) で、これで
+  計算すると 53 回 × 0.18秒 ≒ 9.5秒 ≒ 約286フレーム分となり、実際の減少 (約213件)
+  とは合わない。処理件数の減少と描画時間の関係は説明しきれていない
 * Milestone 6 のログは残っておらず、100 MHz 時の切り替わり回数との厳密な比較は
   できていない
 
@@ -603,9 +605,128 @@ Phase 0.8 で追加したテストのうち、Milestone 4 の「異なる Job Ty
 テストの間だけ `whisplay_client.py` を含むディレクトリを `sys.path` から除き、読み込み
 済みのモジュールも外す `isolated_driver_import` を追加して修正した (`01a108e`)。
 
-## 10. 次の課題
+## 10. Milestone 11 --- Real-device Acceptance
 
-* Milestone 11: Real-device Acceptance。LCD の SPI clock (8 / 16 / 32 MHz) の比較
+実機確認日: 2026-10-02 (Raspberry Pi 5 + AI HAT+ 2 + Whisplay HAT、積層構成)
+
+### 10.1 LCD の SPI clock 比較 (Design Issue #8)
+
+`RealWhisplayAdapter.display()` を `Person detected` / `No person detected` で交互に
+40 回 (0.5 秒間隔) 描画し、速度ごとに描画時間を測った。同じ手順を 3 回行った。
+
+| SPI | 中央値 | 最大 | SPI 転送の理論値 | 差 (転送以外) |
+|---|---|---|---|---|
+| 8 MHz | 180 ms | 194 ms | 134 ms | 約 46 ms |
+| 16 MHz | 116 ms | 129〜155 ms | 67 ms | 約 49 ms |
+| 32 MHz | 83 ms | 96 ms | 34 ms | 約 49 ms |
+
+描画時間は「転送以外の約 48 ms (Python での文字描画と RGB565 変換) + SPI 転送時間」
+でよく説明できる。
+
+LCD のノイズ (目視) は、1 回目は 16 / 32 MHz、2 回目はなし、3 回目は 8 / 16 MHz で
+出た。**8 MHz でも再発し、速度を下げても無くならない。** Design Issue #8 の
+「8 MHz でも表示異常が再発する場合はハードウェア側の対策を検討する」に該当したため、
+Issue #8 に結果を記録し、方針の判断を仰いでいる。
+
+### 10.2 30 分連続稼働 (AC-02 / AC-28)
+
+```bash
+rpicam-hello -t 1800000 --post-process-file edge/detection_logger/hailo_yolov8_logger.json \
+  --nopreview | python3 -m runtime.robot_runtime --log-path /tmp/m11_long.jsonl
+```
+
+(SSH 切断に備えて `nohup` で実行。温度は 30 秒ごとに `vcgencmd` で記録)
+
+* 30 分で 42,578 件 (約 23.7 件/秒)、表示の切り替わり 2,802 回。Runtime / rpicam-hello
+  ともエラー 0 件で、EOF で正常終了した
+* **温度 47.7〜54.3 ℃、62 回の記録すべてで `throttled=0x0`** (AC-28)
+* **約 15 分後から LCD に文字が表示されなくなった** (バックライトは点灯し、点滅する
+  ような状態)。描画失敗のログは無い。その後 LCD を初期化し直すと表示が戻った。
+  LCD コントローラが途中でおかしな状態になり、初期化するまで戻らないと考えられる
+  (推測)。Issue #8 に記録した
+* 切り替わりのたびに描画しており、8 MHz では 30 分のうち約 500 秒 (約 28%) が LCD
+  描画に使われている計算になる。Phase 0.5 の判定のちらつき (15.4) が描画量を増やしている
+
+### 10.3 AI Job 実行中の Core 応答性 (AC-27 / AC-AI-01)
+
+`--ai vlm --npu-mode ai` で Button を押して VLM を起動し、実行中にさらに2回押した。
+
+* VLM の実行中 (07:49:47〜07:50:08) に押した2回の Button が、その間に cycle として
+  処理された。2件目は3件目に置き換えられ実行されなかった (Backpressure)
+* 1件目の worker 回収後に NPU が解放され、同じミリ秒で次の Job が NPU を獲得した
+* Button を押した瞬間の時刻は記録していないため、押してから処理されるまでの遅れ
+  自体は測っていない
+
+### 10.4 縮退運転と継続不能時の終了 (AC-24 / AC-25 / AC-26)
+
+* `WHISPLAY_DRIVER_DIR=/nonexistent` で Vision を 10 秒動かした。原因つきで
+  `Whisplay unavailable; continuing with console output only` を記録し、console 出力
+  のみで処理を続け `exit=0`
+* `--log-path /proc/m11/robot.jsonl` (Robot Data Log を保存できない) で起動した。
+  Whisplay の初期化後に `Robot Runtime failed` と traceback を記録して `exit=1` で終了し、
+  プロセスは残らなかった。LED は元から消えていたため、cleanup で消灯したことは
+  目視では確認できていない (cleanup の実行は自動テストで確認済み)
+
+### 10.5 インターネット接続なしでの動作 (AC-29)
+
+LAN は接続したまま、デフォルトルート (eth0 / wlan0 の2本) を一時的に削除して
+インターネットに出られない状態 (`ping: connect: Network is unreachable`) を作り、
+90 秒後に自動で戻した。
+
+```bash
+sudo -v   # 先に前面で認証しておく (バックグラウンドの sudo はパスワードを入力できない)
+ip route show default > /tmp/m11_default_routes.txt
+sudo bash -c 'while read -r r; do ip route del $r; done < /tmp/m11_default_routes.txt; sleep 90; while read -r r; do ip route add $r; done < /tmp/m11_default_routes.txt' &
+```
+
+その状態で Vision E2E を 20 秒動かし、Button も押した。Camera / YOLO / Runtime /
+Rule Reason / Whisplay (Button、LCD) / Log が動作し、`exit=0` で終了した。
+
+### 10.6 Acceptance Criteria の状況
+
+| AC | 状況 | 根拠 |
+|---|---|---|
+| AC-01 Runtime Lifecycle | 実機 OK | 各 Milestone |
+| AC-02 Existing Vision Input | 実機 OK | 10.2 (30 分) |
+| AC-03 Observation | 実機 OK | 5.2 |
+| AC-04 State Update | 自動テスト | 9.3 |
+| AC-05 Rule Reason (AI 無効) | 実機 OK | 5.2 |
+| AC-06 Core Loop | 実機 OK | 5.2 |
+| AC-07 Shutdown | 実機 OK | 5.2、6.6 (Ctrl+C / EOF / worker) |
+| AC-08 State Backpressure | 実機 OK | 6.6、10.2 |
+| AC-09 Event Ordering | 自動テスト + 実機 | 9.3、5.2 |
+| AC-10 Deterministic Rule | 自動テスト | 9.3 |
+| AC-11 AI-independent Core | 実機 OK | `--ai none` の各確認 |
+| AC-12 Whisplay Display | **条件付き** | 表示はできるが、積層構成でノイズや長時間稼働時の表示停止がある (10.1 / 10.2、Issue #8) |
+| AC-13 Whisplay LED | 実機 OK | 4.5、5.2 |
+| AC-14 Whisplay Button | 実機 OK | 4.5、5.2 |
+| AC-15 Whisplay Speaker | 実機 OK | 4.4 / 4.5 (Runtime の `PLAY_AUDIO` 経路は未使用) |
+| AC-16 Whisplay Microphone | 実機 OK | 4.5、6.3 |
+| AC-17 Button E2E | 実機 OK | 5.2、10.5 |
+| AC-18 Vision E2E | 実機 OK | 5.2 (LCD 表示は AC-12 と同じ条件付き) |
+| AC-19 Hardware Abstraction | 構造 + 自動テスト | 3、9.3 |
+| AC-20 Fake Hardware | 自動テスト | 9.3 |
+| AC-21 Traceability | 実機 OK | 6.6 (`job_id` で要求と結果を対応付け) |
+| AC-22 Structured Log | 実機 OK | schema v0.2 |
+| AC-23 Application Log | 実機 OK | 各 Milestone |
+| AC-24 Non-critical Failure | 実機 OK | 10.4、6.6 (カメラ未接続) |
+| AC-25 Device Failure Visibility | 実機 OK | 10.4、6.6 |
+| AC-26 Fatal Shutdown | 実機 OK | 10.4 (LED 消灯は目視未確認) |
+| AC-27 Core Responsiveness | 実機 OK | 10.3。LCD 描画1回あたり約 0.18 秒 (8 MHz) Core が止まる |
+| AC-28 Thermal | 実機 OK | 10.2 |
+| AC-29 Offline Core | 実機 OK | 10.5 |
+| AC-30〜33 | 自動テスト (Pi 含む) | 9.1 |
+| AC-AI-01〜04 | 実機 OK | 6.6、10.3 |
+| AC-NPU-01〜04 | 実機 OK | 8.3 (Runtime 外の rpicam-hello は防げない制限あり) |
+| AC-JOB-01 | 自動テスト | 9.3 |
+| AC-EXT-01〜04 | 実機 OK | 6.3、6.6 (STT の精度に課題) |
+
+## 11. 次の課題
+
+* Design Issue #8 の追加判断 (Hardware 側対策の進め方、暫定 SPI clock、ソフトウェア側の
+  緩和策の要否)
+* Milestone 12: Documentation / Progress (ADR、README / AGENTS の Current Phase、
+  Implementation PR)
   (Design Issue #8) を含む
 * Vision の推論状態を判定する信号 (ADR 0008 の将来課題) と NPU mode management の
   自動切替 (Design Issue #9 で将来課題とした)
