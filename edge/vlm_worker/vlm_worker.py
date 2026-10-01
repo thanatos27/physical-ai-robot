@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import signal
 import subprocess
 import sys
 import tempfile
@@ -34,12 +33,6 @@ from hailo_platform.genai import VLM
 DEFAULT_PROMPT = "Describe the image in one short sentence."
 SYSTEM_PROMPT = "You are a helpful assistant that analyzes images and answers questions about them."
 VLM_INPUT_SIZE = (336, 336)
-
-
-def _on_sigterm(signum: int, frame: object) -> None:
-    # Runtime の shutdown / timeout で terminate されたとき、finally で
-    # VLM / VDevice を解放してから終了する。
-    raise SystemExit(128 + signum)
 
 
 def capture(path: str) -> None:
@@ -67,8 +60,10 @@ def main() -> int:
     parser.add_argument("--max-tokens", type=int, default=100)
     args = parser.parse_args()
 
-    signal.signal(signal.SIGTERM, _on_sigterm)
-
+    # SIGTERM にはハンドラを登録しない (既定動作で即時終了)。Python のハンドラを
+    # 登録すると native の待機 (HailoRT の poll) が EINTR で中断され、実機で
+    # HailoRT が abort した。プロセス終了時にデバイスは解放され、直後の再実行で
+    # NPU を利用できることを実機で確認している (phase-0.8-progress #6)。
     vdevice = None
     vlm = None
     try:

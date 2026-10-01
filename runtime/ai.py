@@ -142,6 +142,10 @@ class SubprocessAIBackend:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # 端末の Ctrl+C (SIGINT) を worker に直接届けない。実機で、推論中の
+            # HailoRT が SIGINT による EINTR で abort した。worker の停止は
+            # Runtime が terminate / kill で管理する (#15.3)。
+            start_new_session=True,
         )
         with self._lock:
             self._procs.add(proc)

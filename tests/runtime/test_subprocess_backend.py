@@ -36,6 +36,17 @@ class SubprocessAIBackendTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no JSON result"):
             backend.run(job())
 
+    def test_worker_is_started_in_its_own_session(self):
+        # 端末の Ctrl+C (SIGINT) が worker に直接届かないこと (実機で HailoRT が
+        # SIGINT による EINTR で abort したため)。
+        from unittest import mock
+
+        backend = SubprocessAIBackend(python('print(\'{"output": "x"}\')'))
+        with mock.patch("runtime.ai.subprocess.Popen", wraps=__import__("subprocess").Popen) as popen:
+            backend.run(job())
+
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
     def test_timeout_kills_and_reaps_worker_before_returning(self):
         backend = SubprocessAIBackend(python("import time; time.sleep(30)"))
 
