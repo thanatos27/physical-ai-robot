@@ -540,6 +540,36 @@ Hailo-10H を第一候補 Backend とする。
 
 Streaming VLM は実装しない。
 
+### 11.4 Milestone 7 Runtime Integration Policy
+
+AC-EXT-04 を成立させるため、Milestone 7 では以下を暫定方針とする。
+
+```text
+Whisplay Button
+    ↓
+VLM Job request
+    ↓
+per-job subprocess
+    ↓
+single Camera Image
+    ↓
+Local VLM
+    ↓
+AI Result Event
+    ↓
+Robot Event Log
+```
+
+- 実 Hailo Backend は Job ごとの subprocess で実行する
+- worker は hailo-apps 用 venv の Python を利用し、Runtime Core は既存の軽量な依存境界を維持する
+- timeout / failure / shutdown 時は worker を terminate / kill し、wait / reap 完了前に次の NPU Job を開始しない
+- VLM proof は連続 Vision を停止した状態で行い、worker が `rpicam-still` 等で単一画像を取得する
+- Button press を VLM Job の起動トリガーとする
+- Button の既存表示は Job 受付フィードバックとして利用してよい
+- AC-EXT-04 は AI Result Event の payload が Robot Event Log に記録されることで満たす
+- VLM 出力文の LCD 表示、およびそのための Decision / Action / schema 変更は Milestone 7 では行わない
+
+この方式は Connectivity Proof 用の暫定構成である。常駐 worker、model resident、YOLO / VLM の共存方式、Camera sharing、NPU arbitration の最終形は Milestone 8 の実機結果をもとに決定する。
 ### Related AC
 
 - AC-EXT-01
@@ -571,13 +601,16 @@ on-demand Local VLM
 
 確認事項:
 
-- 同時利用可能か
+- NPU 上で YOLO と VLM を同時利用可能か
 - VDevice / device ownership conflict が出るか
+- Camera device ownership conflict が出るか
+- 連続 Vision Pipeline から VLM 用 frame を共有可能か
 - YOLO pipeline に影響するか
 - VLM 起動 / 終了後に YOLO が継続できるか
+- Vision stop / capture / restart が必要か
+- per-job subprocess を継続すべきか、常駐 worker / model resident が成立するか
 - latency / memory / temperature
 - failure 時の復旧
-
 ### Decision
 
 #### coexistence possible
@@ -597,6 +630,8 @@ restart / health check
 ```
 
 が必要か検討する。
+
+Milestone 7 で採用した per-job subprocess と Vision 停止中の単一画像取得は、この実機結果をもとに継続・変更を判断する。
 
 この時点で既存設計だけでは判断できない場合、Design Issue を起票する。
 
