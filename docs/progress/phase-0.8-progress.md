@@ -547,9 +547,64 @@ python3 -m runtime.robot_runtime --ai vlm --npu-mode ai --log-path /tmp/m9_ai.js
   確認時 (674 件) より少なかった。人の検出の切り替わりが多く、8 MHz での LCD 描画が
   増えたためと考えられるが、切り替わり回数は計測していない
 
-## 9. 次の課題
+## 9. Milestone 10 --- Regression / Automated Verification
 
-* Milestone 10: Regression / Automated Verification (Raspberry Pi 上での自動テスト実行を含む)
+### 9.1 結果 (2026-10-02)
+
+```bash
+python3 -m unittest discover -s tests -t .
+```
+
+| 環境 | 結果 |
+|---|---|
+| 開発 PC (Windows, Python 3.13) | 131 件パス (Pillow 未導入のため LCD 描画テスト1件 skip) |
+| Raspberry Pi 5 (Debian 13, システムの python3) | **131 件パス、skip なし**。実機の Whisplay を一度も初期化していない (`Detected hardware` の出力 0 回) |
+
+Phase 0.5 から未確認だった「Raspberry Pi 上での自動テスト実行」も確認できた。
+
+### 9.2 既存テストの扱い
+
+Milestone 0 時点 (`8bd7d60`) の 25 件のテストは、削除・改名されたものは無い。内容を
+更新したテストは、いずれも仕様変更に伴うもので、理由をコミットに記録している。
+
+* Dispatch path では raw 入力件数と RobotLoopRecord 件数の一致を求めない (PR #5)
+* schema v0.2 (`cycle_id`、`event`) (Milestone 3)
+* `main()` を経由するテストに `--hardware none` を追加 (Milestone 6)
+
+Phase 0.8 で追加したテストのうち、Milestone 4 の「異なる Job Type は同時に実行する」
+テストは、Milestone 9 (`EXCLUSIVE_AI` の間は異なる type も拒否) に合わせて更新した。
+
+### 9.3 確認対象とテストの対応
+
+| 確認対象 (implementation plan #14) | 主なテスト |
+|---|---|
+| Phase 0.5 parser | `test_input` |
+| Observation conversion | `test_observation` |
+| RuleReasoner | `test_reasoner` |
+| Phase 0.5 legacy direct-input E2E (1件 = 1 cycle) | `test_runtime.RobotRuntimeTest` |
+| Phase 0.8 Dispatch path | `test_dispatch`、`test_runtime.MainTest` / `CliEndToEndTest` |
+| State latest-only | `test_state`、`test_dispatch.StateChannelCoalescingTest` |
+| Event FIFO | `test_event`、`test_dispatch.DispatchQueueEventOrderingTest` |
+| Fake Hardware | `test_adapters`、`test_hardware_executor`、`test_whisplay_adapter` |
+| Fake AI success / failure / timeout | `test_ai.AIJobManagerLifecycleTest`、`FakeAIBackendTest` |
+| AI Job non-blocking | `test_ai_runtime_integration` |
+| Backpressure | `test_ai.AIJobManagerBackpressureTest` |
+| shutdown / cleanup | `test_ai.AIJobManagerShutdownTest`、`test_subprocess_backend`、`test_runtime.MainWhisplayTest`、`test_vlm_integration.MainVlmTest` |
+| structured logging | `test_runtime.ButtonEndToEndTest`、`test_vlm_integration` |
+
+### 9.4 Raspberry Pi 上の実行で見つかり修正した問題
+
+最初の実行で、`test_missing_driver_is_device_unavailable` が**実機の Whisplay を
+初期化して**失敗した。`RealWhisplayAdapter` が `~/Whisplay/runtime` を `sys.path` に
+追加したまま戻さないため、`WHISPLAY_DRIVER_DIR` を空にしても本物の `whisplay_client`
+が import されていた。`MainWhisplayTest` の同種のテストも、実行順しだいで同じ状態に
+なり得た (開発 PC で、偽の「本物のドライバ」を `PYTHONPATH` に置いて再現)。
+
+テストの間だけ `whisplay_client.py` を含むディレクトリを `sys.path` から除き、読み込み
+済みのモジュールも外す `isolated_driver_import` を追加して修正した (`01a108e`)。
+
+## 10. 次の課題
+
 * Milestone 11: Real-device Acceptance。LCD の SPI clock (8 / 16 / 32 MHz) の比較
   (Design Issue #8) を含む
 * Vision の推論状態を判定する信号 (ADR 0008 の将来課題) と NPU mode management の
