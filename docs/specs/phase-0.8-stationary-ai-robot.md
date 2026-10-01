@@ -665,12 +665,13 @@ AI worker は hailo-apps 用 venv の Python で起動し、Runtime Core 側に�
 timeout / failure / shutdown 時は worker process の終了を要求し、必要に応じて kill したうえで wait / reap まで完了させる。前 Job の worker が終了したことを確認するまでは、同じ NPU を利用する次の pending Job を開始しない。
 
 この subprocess 方式は Milestone 7 の Connectivity Proof を安全に成立させるための暫定方式であり、Phase 0.8 の恒久的な AI worker architecture として確定しない。常駐 worker、model resident、YOLO との concurrent execution 等は Milestone 8 の実機検証結果をもとに判断する。
+
 実装時には以下を確認する。
 
 - 現行 `stdin_input_source` と複数 Event Source の統合方法
 - SIGINT / Shutdown の既存挙動を壊さないこと
 - Worker の停止・timeout・exception propagation
-- thread と subprocess のどちらが Phase 0.8 に適切か
+- Milestone 8 の実機結果をもとに、per-job subprocess を継続するか、常駐 worker 等へ変更するか
 - Phase 1 以降で Worker 実装を交換できる境界になっているか
 
 ---
@@ -774,6 +775,7 @@ Milestone 8 では NPU ownership に加えて Camera ownership も実機検証�
 - VLM 終了後に Vision Pipeline が正常復帰するか
 
 Camera / NPU の lifecycle coordination は、Milestone 8 の実測結果が得られるまで作り込まない。
+
 ---
 
 ## 17. Backpressure
