@@ -177,8 +177,82 @@ Milestone 6 (Whisplay Runtime Integration) で `runtime/adapters/whisplay.py`
 * Raspberry Pi 5 + AI HAT+ 2 + Whisplay の物理クリアランス・FFC
   ケーブル取り回し (積層後の外観確認は未実施)
 
-## 5. 次の課題
+## 5. Milestone 6 --- Whisplay Runtime Integration
 
-* Milestone 6: Whisplay Runtime Integration (`runtime/adapters/whisplay.py`
-  の実装、Button Event / Display / LED / Speaker Action の実配線)
-* Milestone 7 以降: AI Connectivity Proof、NPU 実機検証
+### 5.1 実装
+
+* `runtime/adapters/whisplay.py`: `RealWhisplayAdapter`。4.6 の board API に
+  合わせて実装した。PiSugar の driver コードはこのリポジトリへ vendor せず、
+  外部依存として扱う (`WHISPLAY_DRIVER_DIR`、既定 `~/Whisplay/runtime`)
+* Button press は Vision と同じ Dispatch Queue へ `BUTTON_PRESSED` として投入する
+  (release は Event を出さない)
+* `play_audio` は board に API が無いため `aplay -D whisplaysound` で再生する
+* Vision の console report (Phase 0.5 で実機確認済み) は維持し、Display / LED
+  へは best-effort でミラーする (`PERSON_DETECTED` → LED 緑、`NO_PERSON` →
+  LED 消灯)。ミラー失敗は report の結果に影響させない
+* LCD 描画コストが大きいため、display / set_led は直前と同じ内容なら再出力しない
+* Whisplay を取得できない場合は Phase 0.5 と同じ console 出力のみで継続する
+* `--hardware {auto,none}` を追加した (既定 `auto`。自動テストは `none` で実機に
+  触れない)
+* Runtime 停止時 (正常 / 異常とも) に cleanup で LED 消灯・board 解放を行う
+
+自動テストは開発 PC で97件パスした (Pillow 未導入のため Display 描画テスト
+1件は skip)。
+
+### 5.2 実機確認 (Raspberry Pi 5 + Whisplay HAT、2026-10-01)
+
+実行 (リポジトリルートで):
+
+```bash
+# Button E2E (カメラなし)
+python3 -m runtime.robot_runtime --log-path /tmp/m6_button.jsonl
+
+# Vision E2E
+rpicam-hello -t 30000 \
+  --post-process-file edge/detection_logger/hailo_yolov8_logger.json \
+  --nopreview | python3 -m runtime.robot_runtime --log-path /tmp/m6_vision.jsonl
+```
+
+* **起動:** `Whisplay hardware adapter active` が出力された
+* **Button E2E (AC-17):** ボタン押下で LCD に `Button pressed` が表示された。
+  5回押して5レコード、`cycle_id` 1〜5、`event` が `BUTTON_PRESSED`、
+  `observation` が `null`、`result` はすべて `SUCCESS`
+* **Ctrl+C での終了:** traceback なしで `Interrupted; stopping` →
+  `Robot Runtime stopped` となった。Vision 読み取りを producer thread へ移した
+  後も、実機で SIGINT の挙動が保たれていることを確認した
+* **Vision E2E (AC-18):** 人が映ると LCD に `Person detected` が表示され LED が
+  緑に点灯、外れると `No person detected` が表示され LED が消灯した
+* **Vision 実行中の Button:** 30秒で887レコード (PERSON_DETECTED 176、NO_PERSON
+  710、BUTTON_PRESSED 1)。Vision 実行中に押した Button も `cycle_id` 495 として
+  処理・記録され、Vision と Button が同じ Dispatch Queue で multiplex された
+* **処理レート:** 30秒で887レコード (約29.6件/秒) で、約30fps の入力に対して
+  State Coalescing による間引きはほぼ発生しなかった。LCD ミラーを入れても Core
+  はフレームレートに追従している
+* **EOF での終了:** `rpicam-hello -t 30000` の終了後、`Robot Runtime stopped`
+  となり、cleanup により LED が消灯した
+
+### 5.3 観測した挙動と制限
+
+* Vision 実行中は、Button の `Button pressed` 表示が次の Vision フレームの表示で
+  すぐに上書きされ、LCD 上ではほぼ見えない (ログには記録される)。1 Decision →
+  1 Action の現在の構造による
+* カメラの角度によって LCD / LED がちらつくことがある。Phase 0.5 第15.4章の、
+  人が映っている間に1〜2フレームだけ検出0件になる挙動による
+* LCD の文字は Pillow の既定フォントで描画しており、小さい
+
+### 5.4 未確認
+
+* `PLAY_AUDIO` Action を `RealWhisplayAdapter` 経由で実機再生すること
+  (現在の Decision に Speaker を使うものが無い。Speaker 自体は 4.5 で確認済み)
+* Whisplay が利用できない状態での縮退運転 (AC-24 / AC-25) の実機での挙動
+  (自動テストのみ)
+* 異常終了時の cleanup の実機での挙動 (自動テストのみ)
+* Internet 接続なしでの Core 動作 (AC-29)
+* Raspberry Pi 上での自動テスト実行 (Milestone 10)
+
+## 6. 次の課題
+
+* Milestone 7: AI Connectivity Proof (STT / LLM / VLM)
+* Milestone 8: Hailo YOLO / VLM Coexistence Spike
+* 5.3 の Button 表示が Vision に上書きされる挙動は、Button に対する UX を
+  決める際に設計側で扱う
