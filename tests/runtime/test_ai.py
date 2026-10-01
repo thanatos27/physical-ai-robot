@@ -161,23 +161,28 @@ class AIJobManagerBackpressureTest(unittest.TestCase):
         self.assertEqual(completed_ids, [first.job_id, third.job_id])
         self.assertNotIn(second.job_id, completed_ids)
 
-    def test_different_job_types_run_concurrently_without_blocking_each_other(self):
+    def test_different_job_type_is_rejected_while_npu_is_exclusive(self):
+        # Milestone 9 (Issue #9): NPU は EXCLUSIVE_AI の間、type が異なる Job にも
+        # 割り当てない (AC-NPU-01)。Milestone 4 では異なる type は同時に実行していた。
         sink = EventSink()
-        slow_id = new_job_id()
-        fast_id = new_job_id()
-        backend = FakeAIBackend(delays={slow_id: 0.3, fast_id: SHORT})
+        backend = BlockingBackend()
         manager = AIJobManager(backend, sink)
+        running = AIJob(new_job_id(), AIJobType.STT, "fake", None, timeout=2.0)
+        other = AIJob(new_job_id(), AIJobType.VLM, "fake", None, timeout=2.0)
 
-        slow = AIJob(slow_id, AIJobType.STT, "fake", None, timeout=2.0)
-        fast = AIJob(fast_id, AIJobType.VLM, "fake", None, timeout=2.0)
+        manager.submit(running)
+        manager.submit(other)
+        events = sink.wait_for(1)
 
-        manager.submit(slow)
-        manager.submit(fast)
+        self.assertEqual(events[0].payload.job_id, other.job_id)
+        self.assertEqual(events[0].payload.status, AIJobStatus.REJECTED)
+        self.assertIn(running.job_id, events[0].payload.detail)
+        # 拒否された Job の worker は起動されない。
+        self.assertEqual(backend.started, [running.job_id])
 
-        events = sink.wait_for(2, timeout=2.0)
-        # type が異なるため、fast (VLM) が slow (STT) を待たず先に完了する。
-        self.assertEqual(events[0].payload.job_id, fast_id)
-        self.assertEqual(events[1].payload.job_id, slow_id)
+        backend.release()
+        sink.wait_for(2)
+        self.assertEqual(sink.events[1].payload.status, AIJobStatus.COMPLETED)
 
     def test_status_reports_running_then_queued_for_pending(self):
         sink = EventSink()
@@ -301,18 +306,80 @@ class AIJobManagerShutdownTest(unittest.TestCase):
 
 
 class NpuResourceStateTest(unittest.TestCase):
-    def test_free_when_idle_and_exclusive_while_any_job_running(self):
+    def test_free_exclusive_free_around_a_job(self):
         sink = EventSink()
-        backend = FakeAIBackend(default_delay=0.2)
+        backend = BlockingBackend()
         manager = AIJobManager(backend, sink)
         self.assertEqual(manager.npu_state(), NpuResourceState.FREE)
 
-        manager.submit(job(job_type=AIJobType.STT, timeout=2.0))
-        manager.submit(job(job_type=AIJobType.VLM, timeout=2.0))
+        manager.submit(job(timeout=2.0))
         self.assertEqual(manager.npu_state(), NpuResourceState.EXCLUSIVE_AI)
 
-        sink.wait_for(2, timeout=2.0)
+        backend.release()
+        sink.wait_for(1)
+        time.sleep(0.05)
         self.assertEqual(manager.npu_state(), NpuResourceState.FREE)
+
+
+class NpuArbiterTest(unittest.TestCase):
+    def test_vision_mode_reserves_npu_and_rejects_ai(self):
+        from runtime.ai import NpuArbiter, NpuMode
+
+        arbiter = NpuArbiter(NpuMode.VISION)
+
+        self.assertEqual(arbiter.state(), NpuResourceState.VISION)
+        reason = arbiter.try_acquire("job-1")
+        self.assertIn("VISION", reason)
+        self.assertEqual(arbiter.state(), NpuResourceState.VISION)
+
+    def test_ai_mode_acquire_and_release(self):
+        from runtime.ai import NpuArbiter, NpuMode
+
+        arbiter = NpuArbiter(NpuMode.AI)
+
+        self.assertIsNone(arbiter.try_acquire("job-1"))
+        self.assertEqual(arbiter.state(), NpuResourceState.EXCLUSIVE_AI)
+        self.assertIn("job-1", arbiter.try_acquire("job-2"))
+
+        arbiter.release("job-2")  # 所有者でない Job の release は無視する
+        self.assertEqual(arbiter.state(), NpuResourceState.EXCLUSIVE_AI)
+
+        arbiter.release("job-1")
+        self.assertEqual(arbiter.state(), NpuResourceState.FREE)
+
+    def test_transitions_are_logged(self):
+        from runtime.ai import NpuArbiter, NpuMode
+
+        with self.assertLogs("runtime.ai", level="INFO") as logs:
+            arbiter = NpuArbiter(NpuMode.AI)
+            arbiter.try_acquire("job-1")
+            arbiter.release("job-1")
+
+        output = "\n".join(logs.output)
+        self.assertIn("NPU mode: ai", output)
+        self.assertIn("FREE -> EXCLUSIVE_AI (job=job-1)", output)
+        self.assertIn("EXCLUSIVE_AI -> FREE (job=job-1)", output)
+
+
+class VisionModeManagerTest(unittest.TestCase):
+    def test_job_is_rejected_without_starting_worker_in_vision_mode(self):
+        from runtime.ai import NpuArbiter, NpuMode
+
+        sink = EventSink()
+        backend = BlockingBackend()
+        manager = AIJobManager(backend, sink, NpuArbiter(NpuMode.VISION))
+        j = job()
+
+        manager.submit(j)
+        events = sink.wait_for(1)
+
+        result = events[0].payload
+        self.assertEqual(result.job_id, j.job_id)
+        self.assertEqual(result.status, AIJobStatus.REJECTED)
+        self.assertIn("VISION", result.detail)
+        self.assertEqual(backend.started, [])
+        self.assertIsNone(manager.status(j.job_id))
+        self.assertEqual(manager.npu_state(), NpuResourceState.VISION)
 
 
 if __name__ == "__main__":

@@ -167,6 +167,60 @@ class MainVlmTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         opener.assert_not_called()
 
+    def test_npu_mode_defaults_to_vision(self):
+        from runtime.ai import NpuMode
+
+        with mock.patch("runtime.robot_runtime._open_vlm", return_value=None) as opener:
+            self._run_main(["--ai", "vlm", "--log-level", "ERROR"])
+
+        arbiter = opener.call_args.args[1]
+        self.assertIs(arbiter.mode, NpuMode.VISION)
+
+    def test_npu_mode_ai_is_passed_to_the_vlm_manager(self):
+        from runtime.ai import NpuMode
+
+        with mock.patch("runtime.robot_runtime._open_vlm", return_value=None) as opener:
+            self._run_main(["--ai", "vlm", "--npu-mode", "ai", "--log-level", "ERROR"])
+
+        arbiter = opener.call_args.args[1]
+        self.assertIs(arbiter.mode, NpuMode.AI)
+
+
+class VisionModeButtonEndToEndTest(unittest.TestCase):
+    """Issue #9: Vision 運用中 (--npu-mode vision) の VLM 要求は worker を起動せず
+    理由付きで拒否され、Robot Event Log から追跡できる。"""
+
+    def test_button_in_vision_mode_records_rejected_ai_result(self):
+        from runtime.ai import NpuArbiter, NpuMode
+
+        dispatch = DispatchQueue()
+        backend = FakeAIBackend()
+        with mock.patch.object(backend, "run", wraps=backend.run) as run:
+            manager = AIJobManager(backend, dispatch.push_event, NpuArbiter(NpuMode.VISION))
+            executor = AIRequestExecutor(HardwareExecutor(FakeHardwareAdapter()), manager, 60.0, "fake")
+
+            with tempfile.TemporaryDirectory() as tmp:
+                log_path = Path(tmp) / "robot.jsonl"
+                runtime = RobotRuntime(
+                    input_source=_dispatched(dispatch, count=2),
+                    adapter=ObservationAdapter(),
+                    reasoner=RuleBasedReasoner(vlm_enabled=True),
+                    planner=ActionPlanner(),
+                    executor=executor,
+                    data_logger=JsonlRobotDataLogger(log_path),
+                )
+                dispatch.push_event(RuntimeEvent("BUTTON_PRESSED"))
+                runtime.run()
+                records = [json.loads(l) for l in log_path.read_text(encoding="utf-8").splitlines()]
+
+        run.assert_not_called()
+        request, result = records
+        job_id = request["result"]["detail"].removeprefix("job_id=")
+        payload = result["event"]["payload"]
+        self.assertEqual(payload["job_id"], job_id)
+        self.assertEqual(payload["status"], AIJobStatus.REJECTED.value)
+        self.assertIn("VISION", payload["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -39,9 +39,21 @@ Vision との共存は Milestone 8 で検証する (#16.4)。
 
 ## Runtime から使う
 
+連続 Vision を止めた状態で、NPU を AI に割り当てて起動する。
+
 ```bash
-python3 -m runtime.robot_runtime --ai vlm
+python3 -m runtime.robot_runtime --ai vlm --npu-mode ai
 ```
+
+`--npu-mode` の既定は `vision` で、NPU を Vision (rpicam-apps の YOLO) に予約する。
+その場合 Button で要求した VLM Job は worker を起動せずに拒否され、理由付きの
+AI Result (`REJECTED`) として Robot Event Log に記録される (Design Issue #9)。
+rpicam-apps と VLM は NPU を同時に使えないため (Milestone 8)。
+
+`NpuArbiter` は Runtime 管理下の Job に対する受け入れ制御であり、Runtime の外で
+起動された `rpicam-hello` 等による NPU の利用は防げない。VLM の実行中に
+`rpicam-hello` を起動すると、Vision は検出0件を出し続け再起動まで復帰しない
+(`docs/progress/phase-0.8-progress.md` #7)。
 
 venv の Python と HEF の場所は環境変数で変更できる。
 

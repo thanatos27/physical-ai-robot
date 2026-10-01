@@ -31,7 +31,7 @@ from .action import (
     HardwareExecutor,
 )
 from .adapters import DeviceUnavailableError, HardwareAdapter
-from .ai import AIJobManager, SubprocessAIBackend
+from .ai import AIJobManager, NpuArbiter, NpuMode, SubprocessAIBackend
 from .dispatch import DispatchingVisionSource, DispatchQueue
 from .event import RuntimeEvent
 from .input import InputSource, stdin_input_source
@@ -218,6 +218,16 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "none: AI Job を使わない。既定: none"
         ),
     )
+    parser.add_argument(
+        "--npu-mode",
+        default="vision",
+        choices=["vision", "ai"],
+        help=(
+            "vision: NPU を Vision (rpicam-apps の YOLO) に予約し、AI Job は拒否する。"
+            "ai: Vision を使わず、AI Job が NPU を排他的に使う。"
+            "Runtime 外で起動された rpicam-hello 等の NPU 利用は防げない。既定: vision"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -231,7 +241,7 @@ _DEFAULT_GENAI_PYTHON = "~/venvs/hailo-apps/bin/python"
 _DEFAULT_VLM_HEF = "/usr/local/hailo/resources/models/hailo10h/Qwen2-VL-2B-Instruct.hef"
 
 
-def _open_vlm(dispatch: DispatchQueue) -> AIJobManager | None:
+def _open_vlm(dispatch: DispatchQueue, arbiter: NpuArbiter) -> AIJobManager | None:
     """VLM Job 用の AIJobManager を作る。前提が揃わなければ None (AI fallback, NFR-05)。"""
     python = Path(os.path.expanduser(os.environ.get("HAILO_GENAI_PYTHON", _DEFAULT_GENAI_PYTHON)))
     hef = Path(os.environ.get("VLM_HEF_PATH", _DEFAULT_VLM_HEF))
@@ -241,7 +251,7 @@ def _open_vlm(dispatch: DispatchQueue) -> AIJobManager | None:
         return None
     backend = SubprocessAIBackend([str(python), str(_VLM_WORKER), "--hef", str(hef)])
     logger.info("VLM AI Job backend active (per-job subprocess)")
-    return AIJobManager(backend, dispatch.push_event)
+    return AIJobManager(backend, dispatch.push_event, arbiter)
 
 
 def _open_whisplay(dispatch: DispatchQueue) -> HardwareAdapter | None:
@@ -278,7 +288,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.hardware == "auto":
             hardware = _open_whisplay(vision_source.dispatch_queue)
         if args.ai == "vlm":
-            ai_manager = _open_vlm(vision_source.dispatch_queue)
+            arbiter = NpuArbiter(NpuMode(args.npu_mode))
+            ai_manager = _open_vlm(vision_source.dispatch_queue, arbiter)
 
         executor: Executor = (
             HardwareExecutor(hardware) if hardware is not None else ConsoleExecutor()

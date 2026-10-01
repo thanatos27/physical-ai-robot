@@ -44,6 +44,8 @@ class AIJobStatus(str, Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     TIMEOUT = "TIMEOUT"
+    # NpuArbiter が NPU を割り当てず、worker を起動しなかった (Milestone 9, Issue #9)。
+    REJECTED = "REJECTED"
     # CANCELLED は Phase 0.8 では実装しない (#14)。
 
 
@@ -201,18 +203,70 @@ def _parse_worker_output(stdout: str) -> object:
 
 
 class NpuResourceState(str, Enum):
-    """#16.2 NPU Arbiter Boundary の概念状態。
-
-    Milestone 4 時点の AIJobManager は自身が起動した AI Job の実行有無しか
-    把握できない (Runtime 外の rpicam-apps / YOLO の Hailo 利用は見えない)。
-    したがって VISION はここでは一度も設定しない。Vision との実際の排他制御は
-    Milestone 8 (実機での共存検証) の結果を踏まえて Milestone 9 で決定する
-    (AC-NPU-04: 見かけだけの Lock にしない)。
-    """
+    """#16.2 NPU Arbiter Boundary の概念状態。"""
 
     FREE = "FREE"
     VISION = "VISION"
     EXCLUSIVE_AI = "EXCLUSIVE_AI"
+
+
+class NpuMode(str, Enum):
+    """起動時に明示する NPU の運用モード (Milestone 9, Issue #9)。"""
+
+    # Vision (rpicam-apps の YOLO) が NPU を使う。AI Job は拒否する。
+    VISION = "vision"
+    # Vision を使わず、Runtime 管理下の AI Job が NPU を排他的に使う。
+    AI = "ai"
+
+
+class NpuArbiter:
+    """Runtime 管理下の NPU Job に対する admission control / resource visibility。
+
+    Milestone 8 の実機確認で、rpicam-apps (既定の UNIQUE VDevice) と VLM は NPU を
+    同時に使えないことがわかった (Issue #9)。NPU の状態は JSONL の到着間隔から
+    推定せず、起動時に明示されたモードで決める。
+
+    これは OS / HailoRT レベルのロックではない。Runtime の外で手動起動された
+    rpicam-hello 等による NPU の利用は防げない。
+    """
+
+    def __init__(self, mode: NpuMode) -> None:
+        self._lock = threading.Lock()
+        self._mode = mode
+        self._owner_job_id: str | None = None
+        self._state = (
+            NpuResourceState.VISION if mode is NpuMode.VISION else NpuResourceState.FREE
+        )
+        logger.info("NPU mode: %s (state=%s)", mode.value, self._state.value)
+
+    @property
+    def mode(self) -> NpuMode:
+        return self._mode
+
+    def state(self) -> NpuResourceState:
+        with self._lock:
+            return self._state
+
+    def try_acquire(self, job_id: str) -> str | None:
+        """NPU を Job に割り当てる。割り当てたら None、拒否したら理由を返す。"""
+        with self._lock:
+            if self._state is NpuResourceState.VISION:
+                return "NPU is reserved for VISION (--npu-mode vision)"
+            if self._state is NpuResourceState.EXCLUSIVE_AI:
+                return f"NPU is in use by AI job {self._owner_job_id}"
+            self._state = NpuResourceState.EXCLUSIVE_AI
+            self._owner_job_id = job_id
+        logger.info("NPU FREE -> EXCLUSIVE_AI (job=%s)", job_id)
+        return None
+
+    def release(self, job_id: str) -> None:
+        """Job の worker が終了 (reap) した後に呼ぶ (#15.3)。"""
+        with self._lock:
+            if self._owner_job_id != job_id:
+                return
+            self._state = NpuResourceState.FREE
+            self._owner_job_id = None
+        logger.info("NPU EXCLUSIVE_AI -> FREE (job=%s)", job_id)
 
 
 @dataclass
@@ -225,30 +279,28 @@ class AIJobManager:
     """同一 Job Type につき running 最大1件 + pending 最新1件 (#17)。
 
     pending 中に新しい同種 request が来た場合は pending を置換する
-    (古い pending job は実行されない)。異なる Job Type 同士は互いに
-    ブロックしない。Priority Queue / Preemption / Starvation control /
-    Generic scheduler は実装しない。
+    (古い pending job は実行されない)。Job の開始時に NpuArbiter から NPU を
+    獲得し、獲得できなければ worker を起動せず REJECTED を返す。異なる Job Type
+    の Job も、NPU が EXCLUSIVE_AI の間は拒否される (AC-NPU-01)。
+    Priority Queue / Preemption / Starvation control / Generic scheduler は
+    実装しない。
     """
 
     def __init__(
         self,
         backend: AIBackend,
         push_event: Callable[[RuntimeEvent], None],
+        arbiter: NpuArbiter | None = None,
     ) -> None:
         self._backend = backend
         self._push_event = push_event
+        self._arbiter = arbiter or NpuArbiter(NpuMode.AI)
         self._lock = threading.Lock()
         self._type_state: dict[AIJobType, _TypeState] = {}
-        self._running_job_ids: set[str] = set()
         self._shutting_down = False
 
     def npu_state(self) -> NpuResourceState:
-        with self._lock:
-            return (
-                NpuResourceState.EXCLUSIVE_AI
-                if self._running_job_ids
-                else NpuResourceState.FREE
-            )
+        return self._arbiter.state()
 
     def status(self, job_id: str) -> AIJobStatus | None:
         """QUEUED / RUNNING の間だけ問い合わせ可能。完了後や未知の job_id は
@@ -269,7 +321,6 @@ class AIJobManager:
             state = self._type_state.setdefault(job.type, _TypeState())
             if state.running is None:
                 state.running = job
-                self._running_job_ids.add(job.job_id)
                 start_now = True
             else:
                 state.pending = job  # 既存 pending があれば置換
@@ -288,7 +339,21 @@ class AIJobManager:
                 state.pending = None
         self._backend.shutdown()
 
+    def _emit(self, result: AIResult) -> None:
+        # shutdown 後は Event を出さない (Runtime は既に停止している)。
+        with self._lock:
+            if self._shutting_down:
+                return
+        self._push_event(RuntimeEvent(AI_RESULT, payload=result))
+
     def _start(self, job: AIJob) -> None:
+        reason = self._arbiter.try_acquire(job.job_id)
+        if reason is not None:
+            logger.warning("AI Job rejected: %s (%s)", job.job_id, reason)
+            self._emit(AIResult(job.job_id, job.type, AIJobStatus.REJECTED, detail=reason))
+            self._on_job_finished(job)
+            return
+
         state_lock = threading.Lock()
         reported = False
         timer_holder: list[threading.Timer] = []
@@ -302,10 +367,7 @@ class AIJobManager:
                 reported = True
             if timer_holder:
                 timer_holder[0].cancel()
-            with self._lock:
-                if self._shutting_down:
-                    return
-            self._push_event(RuntimeEvent(AI_RESULT, payload=result))
+            self._emit(result)
 
         def worker() -> None:
             try:
@@ -319,9 +381,10 @@ class AIJobManager:
             else:
                 report(AIResult(job.job_id, job.type, AIJobStatus.COMPLETED, output=output))
             finally:
-                # backend が戻った = NPU を使う処理が終了した後でのみ実行枠を解放し、
-                # 次の pending Job を開始する (#15.3)。timeout を検出した時点では
-                # 解放しない。
+                # backend が戻った = worker が終了 (reap) した後でのみ NPU と実行枠を
+                # 解放し、次の pending Job を開始する (#15.3)。timeout を検出した
+                # 時点では解放しない。
+                self._arbiter.release(job.job_id)
                 self._on_job_finished(job)
 
         def on_timeout() -> None:
@@ -339,11 +402,9 @@ class AIJobManager:
         with self._lock:
             state = self._type_state[job.type]
             state.running = None
-            self._running_job_ids.discard(job.job_id)
             if state.pending is not None and not self._shutting_down:
                 next_job = state.pending
                 state.pending = None
                 state.running = next_job
-                self._running_job_ids.add(next_job.job_id)
         if next_job is not None:
             self._start(next_job)
