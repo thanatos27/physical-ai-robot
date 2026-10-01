@@ -72,6 +72,11 @@ class ConsoleExecutor:
 _REPORT_ACTIONS = frozenset(
     {ActionType.REPORT_PERSON_DETECTED, ActionType.REPORT_NO_PERSON}
 )
+# Vision E2E (Milestone 6, AC-18) で Display / LED へもミラーする LED 状態。
+_REPORT_LED_STATE: dict[ActionType, str] = {
+    ActionType.REPORT_PERSON_DETECTED: "GREEN",
+    ActionType.REPORT_NO_PERSON: "OFF",
+}
 _HARDWARE_ACTIONS: dict[ActionType, str] = {
     ActionType.DISPLAY_MESSAGE: "display",
     ActionType.SET_LED: "set_led",
@@ -93,11 +98,16 @@ class HardwareExecutor:
     止めず FAILED を返し、Application Log へ記録する (NFR-04, AC-23〜25)。
     """
 
+    # 直前と同じ内容なら再出力しない出力先。LCD 描画は1回ごとのコストが大きく、
+    # Vision (約30fps) の毎 cycle で描画すると Core の応答性 (AC-27) を損なうため。
+    _DEDUPED_METHODS = frozenset({"display", "set_led"})
+
     def __init__(self, adapter: HardwareAdapter, stream: TextIO | None = None) -> None:
         self._adapter = adapter
         self._stream = stream
         self._lock = threading.Lock()
         self._device_status: dict[str, DeviceStatus] = {}
+        self._last_output: dict[str, str] = {}
 
     def device_status(self) -> dict[str, DeviceStatus]:
         with self._lock:
@@ -106,6 +116,7 @@ class HardwareExecutor:
     def execute(self, action: Action) -> ActionResult:
         if action.type in _REPORT_ACTIONS:
             print(action.message, file=self._stream, flush=True)
+            self._mirror_report(action)
             return ActionResult(ActionStatus.SUCCESS)
 
         method_name = _HARDWARE_ACTIONS.get(action.type)
@@ -114,15 +125,36 @@ class HardwareExecutor:
                 ActionStatus.FAILED, f"unsupported action: {action.type!r}"
             )
 
+        error = self._call_adapter(method_name, action.message)
+        if error is not None:
+            return ActionResult(ActionStatus.FAILED, error)
+        return ActionResult(ActionStatus.SUCCESS)
+
+    def _mirror_report(self, action: Action) -> None:
+        # Phase 0.5 から実機確認済みの console report を主とし、Display / LED への
+        # 出力は best-effort のミラーとする。ミラー失敗は report の結果
+        # (SUCCESS) に影響させない (Preserve Verified Configurations, AC-24)。
+        self._call_adapter("display", action.message)
+        led_state = _REPORT_LED_STATE.get(action.type)
+        if led_state is not None:
+            self._call_adapter("set_led", led_state)
+
+    def _call_adapter(self, method_name: str, value: str) -> str | None:
+        """成功なら None、失敗ならエラー詳細を返す。"""
+        deduped = method_name in self._DEDUPED_METHODS
+        if deduped and self._last_output.get(method_name) == value:
+            return None
         try:
-            getattr(self._adapter, method_name)(action.message)
+            getattr(self._adapter, method_name)(value)
         except DeviceUnavailableError as exc:
             logger.warning("Hardware action failed: %s (%s)", method_name, exc)
             self._set_device_status(method_name, DeviceStatus(False, str(exc)))
-            return ActionResult(ActionStatus.FAILED, str(exc))
-
+            self._last_output.pop(method_name, None)
+            return str(exc)
         self._set_device_status(method_name, DeviceStatus(True))
-        return ActionResult(ActionStatus.SUCCESS)
+        if deduped:
+            self._last_output[method_name] = value
+        return None
 
     def _set_device_status(self, device: str, status: DeviceStatus) -> None:
         with self._lock:

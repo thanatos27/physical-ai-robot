@@ -21,8 +21,9 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Iterator, Sequence
 
-from .action import ActionPlanner, ConsoleExecutor, Executor
-from .dispatch import DispatchingVisionSource
+from .action import ActionPlanner, ConsoleExecutor, Executor, HardwareExecutor
+from .adapters import DeviceUnavailableError, HardwareAdapter
+from .dispatch import DispatchingVisionSource, DispatchQueue
 from .event import RuntimeEvent
 from .input import InputSource, stdin_input_source
 from .models import (
@@ -189,7 +190,29 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Application Log のレベル (stderr へ出力)。既定: INFO",
     )
+    parser.add_argument(
+        "--hardware",
+        default="auto",
+        choices=["auto", "none"],
+        help=(
+            "auto: Whisplay HAT を使う (利用できなければ console 出力のみで継続)。"
+            "none: Whisplay を使わない (Phase 0.5 と同じ console 出力のみ)。既定: auto"
+        ),
+    )
     return parser.parse_args(argv)
+
+
+def _open_whisplay(dispatch: DispatchQueue) -> HardwareAdapter | None:
+    """Whisplay を取得する。取得できなければ None (縮退運転, AC-24)。"""
+    from .adapters.whisplay import RealWhisplayAdapter
+
+    try:
+        adapter = RealWhisplayAdapter(dispatch)
+    except DeviceUnavailableError as exc:
+        logger.warning("Whisplay unavailable; continuing with console output only: %s", exc)
+        return None
+    logger.info("Whisplay hardware adapter active")
+    return adapter
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -202,16 +225,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         force=True,
     )
 
+    hardware: HardwareAdapter | None = None
     try:
+        # Phase 0.8 Dispatch path (docs/specs/phase-0.8-implementation-plan.md
+        # #Regression Boundary): Vision は State Coalescing を経由する。
+        # raw DetectionEvent 数と RobotLoopRecord 数の一致は要求しない。
+        vision_source = DispatchingVisionSource(stdin_input_source())
+        if args.hardware == "auto":
+            # Button press は Vision と同じ Dispatch Queue へ投入される。
+            hardware = _open_whisplay(vision_source.dispatch_queue)
+        executor: Executor = (
+            HardwareExecutor(hardware) if hardware is not None else ConsoleExecutor()
+        )
         runtime = RobotRuntime(
-            # Phase 0.8 Dispatch path (docs/specs/phase-0.8-implementation-plan.md
-            # #Regression Boundary): Vision は State Coalescing を経由する。
-            # raw DetectionEvent 数と RobotLoopRecord 数の一致は要求しない。
-            input_source=DispatchingVisionSource(stdin_input_source()),
+            input_source=vision_source,
             adapter=ObservationAdapter(),
             reasoner=RuleBasedReasoner(),
             planner=ActionPlanner(),
-            executor=ConsoleExecutor(),
+            executor=executor,
             data_logger=JsonlRobotDataLogger(args.log_path or _default_log_path()),
         )
         with _stop_on_sigint(runtime):
@@ -219,6 +250,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception:
         logger.exception("Robot Runtime failed")
         return 1
+    finally:
+        if hardware is not None:
+            hardware.cleanup()
     return 0
 
 

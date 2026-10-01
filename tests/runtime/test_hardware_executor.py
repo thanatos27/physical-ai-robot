@@ -92,5 +92,90 @@ class HardwareExecutorTest(unittest.TestCase):
         self.assertEqual(ok.status, ActionStatus.SUCCESS)
 
 
+class HardwareExecutorReportMirrorTest(unittest.TestCase):
+    """Milestone 6: Vision の console report を Display / LED へもミラーする (AC-18)。"""
+
+    def test_person_detected_is_mirrored_to_display_and_green_led(self):
+        adapter = FakeHardwareAdapter()
+        executor = HardwareExecutor(adapter, stream=io.StringIO())
+
+        executor.execute(Action(ActionType.REPORT_PERSON_DETECTED, "Person detected"))
+
+        self.assertEqual(
+            adapter.calls, [("display", "Person detected"), ("set_led", "GREEN")]
+        )
+
+    def test_no_person_turns_led_off(self):
+        adapter = FakeHardwareAdapter()
+        executor = HardwareExecutor(adapter, stream=io.StringIO())
+
+        executor.execute(Action(ActionType.REPORT_NO_PERSON, "No person detected"))
+
+        self.assertIn(("set_led", "OFF"), adapter.calls)
+
+    def test_mirror_failure_does_not_fail_the_console_report(self):
+        adapter = FakeHardwareAdapter(fail_on=frozenset({"display", "set_led"}))
+        stream = io.StringIO()
+        executor = HardwareExecutor(adapter, stream=stream)
+
+        result = executor.execute(
+            Action(ActionType.REPORT_PERSON_DETECTED, "Person detected")
+        )
+
+        self.assertEqual(result.status, ActionStatus.SUCCESS)
+        self.assertEqual(stream.getvalue(), "Person detected\n")
+        self.assertFalse(executor.device_status()["display"].available)
+
+    def test_repeated_identical_report_does_not_redraw(self):
+        adapter = FakeHardwareAdapter()
+        executor = HardwareExecutor(adapter, stream=io.StringIO())
+        action = Action(ActionType.REPORT_PERSON_DETECTED, "Person detected")
+
+        for _ in range(5):
+            executor.execute(action)
+
+        self.assertEqual(
+            adapter.calls, [("display", "Person detected"), ("set_led", "GREEN")]
+        )
+
+    def test_changed_report_is_redrawn(self):
+        adapter = FakeHardwareAdapter()
+        executor = HardwareExecutor(adapter, stream=io.StringIO())
+
+        executor.execute(Action(ActionType.REPORT_PERSON_DETECTED, "Person detected"))
+        executor.execute(Action(ActionType.REPORT_NO_PERSON, "No person detected"))
+        executor.execute(Action(ActionType.REPORT_PERSON_DETECTED, "Person detected"))
+
+        displays = [value for method, value in adapter.calls if method == "display"]
+        self.assertEqual(
+            displays, ["Person detected", "No person detected", "Person detected"]
+        )
+
+    def test_display_is_retried_after_a_failure(self):
+        # 失敗した出力は「前回出力済み」として扱わず、次回同じ内容でも再試行する。
+        adapter = FakeHardwareAdapter(fail_on=frozenset({"display"}))
+        executor = HardwareExecutor(adapter, stream=io.StringIO())
+        action = Action(ActionType.DISPLAY_MESSAGE, "hello")
+
+        executor.execute(action)
+        adapter.fail_on = frozenset()
+        result = executor.execute(action)
+
+        self.assertEqual(result.status, ActionStatus.SUCCESS)
+        self.assertEqual(adapter.calls, [("display", "hello")])
+
+    def test_play_audio_is_not_deduplicated(self):
+        adapter = FakeHardwareAdapter()
+        executor = HardwareExecutor(adapter)
+        action = Action(ActionType.PLAY_AUDIO, "chime.wav")
+
+        executor.execute(action)
+        executor.execute(action)
+
+        self.assertEqual(
+            adapter.calls, [("play_audio", "chime.wav"), ("play_audio", "chime.wav")]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

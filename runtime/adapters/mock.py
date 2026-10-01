@@ -24,6 +24,7 @@ class FakeHardwareAdapter:
 
     fail_on: frozenset[str] = field(default_factory=frozenset)
     calls: list[tuple[str, str]] = field(default_factory=list)
+    cleaned_up: bool = False
 
     def display(self, message: str) -> None:
         self._call("display", message)
@@ -33,6 +34,9 @@ class FakeHardwareAdapter:
 
     def play_audio(self, clip: str) -> None:
         self._call("play_audio", clip)
+
+    def cleanup(self) -> None:
+        self.cleaned_up = True
 
     def _call(self, method: str, value: str) -> None:
         if method in self.fail_on:

@@ -334,7 +334,9 @@ class MainTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "nested" / "robot.jsonl"
             with mock.patch("sys.stdin", stdin), mock.patch("sys.stdout", stdout):
-                exit_code = main(["--log-path", str(log_path), "--log-level", "ERROR"])
+                exit_code = main(
+                    ["--log-path", str(log_path), "--log-level", "ERROR", "--hardware", "none"]
+                )
             records = read_records(log_path)
 
         self.assertEqual(exit_code, 0)
@@ -355,10 +357,66 @@ class MainTest(unittest.TestCase):
                 RuleBasedReasoner, "reason", side_effect=RuntimeError("boom")
             ):
                 with self.assertLogs("runtime.robot_runtime", level="ERROR") as logs:
-                    exit_code = main(["--log-path", str(log_path)])
+                    exit_code = main(["--log-path", str(log_path), "--hardware", "none"])
 
         self.assertEqual(exit_code, 1)
         self.assertIn("boom", "\n".join(logs.output))
+
+
+class MainWhisplayTest(unittest.TestCase):
+    """Milestone 6: main() の Whisplay 配線 (縮退運転 / ミラー出力 / cleanup)。"""
+
+    def _run_main(self, extra_args, stdout=None):
+        stdin = io.StringIO(FIXTURE.read_text(encoding="utf-8"))
+        stdout = stdout or io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "robot.jsonl"
+            with mock.patch("sys.stdin", stdin), mock.patch("sys.stdout", stdout):
+                exit_code = main(["--log-path", str(log_path), *extra_args])
+        return exit_code, stdout.getvalue().splitlines()
+
+    def test_auto_falls_back_to_console_when_whisplay_driver_is_missing(self):
+        with tempfile.TemporaryDirectory() as empty_dir, mock.patch.dict(
+            "os.environ", {"WHISPLAY_DRIVER_DIR": empty_dir}
+        ):
+            with self.assertLogs("runtime.robot_runtime", level="WARNING") as logs:
+                exit_code, console = self._run_main(["--hardware", "auto"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(console[-1], EXPECTED_CONSOLE[-1])
+        self.assertIn("Whisplay unavailable", "\n".join(logs.output))
+
+    def test_auto_uses_whisplay_mirror_and_cleans_up(self):
+        adapter = FakeHardwareAdapter()
+        with mock.patch("runtime.robot_runtime._open_whisplay", return_value=adapter):
+            exit_code, console = self._run_main(["--hardware", "auto", "--log-level", "ERROR"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(console[-1], EXPECTED_CONSOLE[-1])
+        # Vision の結果が Display / LED へもミラーされる (AC-18)。
+        self.assertIn(("display", "Person detected"), adapter.calls)
+        self.assertIn(("set_led", "GREEN"), adapter.calls)
+        self.assertTrue(adapter.cleaned_up)
+
+    def test_whisplay_is_cleaned_up_even_when_runtime_fails(self):
+        adapter = FakeHardwareAdapter()
+        with mock.patch(
+            "runtime.robot_runtime._open_whisplay", return_value=adapter
+        ), mock.patch.object(
+            RuleBasedReasoner, "reason", side_effect=RuntimeError("boom")
+        ):
+            with self.assertLogs("runtime.robot_runtime", level="ERROR"):
+                exit_code, _ = self._run_main(["--hardware", "auto"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertTrue(adapter.cleaned_up)
+
+    def test_none_never_opens_whisplay(self):
+        with mock.patch("runtime.robot_runtime._open_whisplay") as opener:
+            exit_code, _ = self._run_main(["--hardware", "none", "--log-level", "ERROR"])
+
+        self.assertEqual(exit_code, 0)
+        opener.assert_not_called()
 
 
 class CliEndToEndTest(unittest.TestCase):
@@ -369,7 +427,10 @@ class CliEndToEndTest(unittest.TestCase):
             log_path = Path(tmp) / "robot.jsonl"
             with FIXTURE.open("rb") as stdin:
                 proc = subprocess.run(
-                    [sys.executable, "-m", "runtime.robot_runtime", "--log-path", str(log_path)],
+                    [
+                        sys.executable, "-m", "runtime.robot_runtime",
+                        "--log-path", str(log_path), "--hardware", "none",
+                    ],
                     stdin=stdin,
                     capture_output=True,
                     text=True,
