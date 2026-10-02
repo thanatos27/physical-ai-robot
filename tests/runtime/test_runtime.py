@@ -7,9 +7,18 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from runtime.action import ActionPlanner, ConsoleExecutor
+from runtime.action import ActionPlanner, ConsoleExecutor, HardwareExecutor
+from runtime.adapters.mock import FakeHardwareAdapter
+from runtime.event import RuntimeEvent
 from runtime.input import JsonlInputSource, parse_detection_event
-from runtime.models import Action, ActionResult, ActionStatus, ActionType
+from runtime.models import (
+    Action,
+    ActionResult,
+    ActionStatus,
+    ActionType,
+    DecisionType,
+    EventRecord,
+)
 from runtime.observation import ObservationAdapter
 from runtime.reasoner import RuleBasedReasoner
 from runtime.robot_logger import JsonlRobotDataLogger
@@ -20,9 +29,10 @@ FIXTURE = REPO_ROOT / "tests" / "fixtures" / "detections_sample.jsonl"
 
 EXPECTED_KEYS = {
     "schema_version",
-    "loop_id",
+    "cycle_id",
     "timestamp",
     "observation",
+    "event",
     "decision",
     "action",
     "result",
@@ -103,10 +113,11 @@ class RobotRuntimeTest(unittest.TestCase):
         self.assertEqual(len(records), 4)
         for record in records:
             self.assertEqual(set(record), EXPECTED_KEYS)
-            self.assertEqual(record["schema_version"], "0.1")
+            self.assertEqual(record["schema_version"], "0.2")
+            self.assertIsNone(record["event"])
             self.assertEqual(record["result"], {"status": "SUCCESS", "detail": None})
             self.assertEqual(record["timestamp"], record["observation"]["timestamp"])
-        self.assertEqual([r["loop_id"] for r in records], [1, 2, 3, 4])
+        self.assertEqual([r["cycle_id"] for r in records], [1, 2, 3, 4])
         self.assertEqual(
             [r["decision"]["type"] for r in records],
             ["PERSON_DETECTED", "NO_PERSON", "NO_PERSON", "PERSON_DETECTED"],
@@ -225,19 +236,118 @@ class RobotRuntimeTest(unittest.TestCase):
         self.assertEqual(runtime.state, RuntimeState.STOPPED)
 
 
+class ButtonEndToEndTest(unittest.TestCase):
+    """Milestone 2 E2E: Fake Button → Event → Rule Reason →
+    Display/LED/Speaker Action → Fake Adapter → Log (AC-17)。"""
+
+    def test_button_press_reaches_display_action_and_is_logged(self):
+        adapter = FakeHardwareAdapter()
+        data_logger = RecordingLogger()
+        runtime = RobotRuntime(
+            input_source=[RuntimeEvent("BUTTON_PRESSED")],
+            adapter=ObservationAdapter(),
+            reasoner=RuleBasedReasoner(),
+            planner=ActionPlanner(),
+            executor=HardwareExecutor(adapter),
+            data_logger=data_logger,
+        )
+
+        count = runtime.run()
+
+        self.assertEqual(count, 1)
+        self.assertEqual(adapter.calls, [("display", "Button pressed")])
+        record = data_logger.records[0]
+        self.assertEqual(record.cycle_id, 1)
+        self.assertIsNone(record.observation)
+        self.assertEqual(record.event, EventRecord("BUTTON_PRESSED"))
+        self.assertEqual(record.decision.type, DecisionType.BUTTON_ACKNOWLEDGED)
+        self.assertEqual(record.action.type, ActionType.DISPLAY_MESSAGE)
+        self.assertEqual(record.result.status, ActionStatus.SUCCESS)
+
+    def test_vision_and_button_events_can_be_mixed_in_one_run(self):
+        # DetectionEvent (Vision) と RuntimeEvent (Button) が同じ RobotRuntime
+        # で正しく multiplex 処理されることを確認する (Milestone 1 の Dispatch
+        # 基盤と Milestone 2 の Reasoner 拡張が両立することの証明)。
+        adapter = FakeHardwareAdapter()
+        data_logger = RecordingLogger()
+        vision_event = two_events()[0]
+        runtime = RobotRuntime(
+            input_source=[vision_event, RuntimeEvent("BUTTON_PRESSED")],
+            adapter=ObservationAdapter(),
+            reasoner=RuleBasedReasoner(),
+            planner=ActionPlanner(),
+            executor=HardwareExecutor(adapter),
+            data_logger=data_logger,
+        )
+
+        count = runtime.run()
+
+        self.assertEqual(count, 2)
+        self.assertEqual(
+            [r.decision.type for r in data_logger.records],
+            [DecisionType.NO_PERSON, DecisionType.BUTTON_ACKNOWLEDGED],
+        )
+        # cycle_id は Vision / Event の種類に関わらず通し番号 (traceability, AC-21)。
+        self.assertEqual([r.cycle_id for r in data_logger.records], [1, 2])
+        vision_record, button_record = data_logger.records
+        # observation / event はどちらか一方だけが非 None になる。
+        self.assertIsNotNone(vision_record.observation)
+        self.assertIsNone(vision_record.event)
+        self.assertIsNone(button_record.observation)
+        self.assertIsNotNone(button_record.event)
+
+    def test_mixed_run_is_written_as_valid_jsonl_with_schema_v0_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "robot.jsonl"
+            runtime = RobotRuntime(
+                input_source=[two_events()[0], RuntimeEvent("BUTTON_PRESSED")],
+                adapter=ObservationAdapter(),
+                reasoner=RuleBasedReasoner(),
+                planner=ActionPlanner(),
+                executor=HardwareExecutor(FakeHardwareAdapter()),
+                data_logger=JsonlRobotDataLogger(log_path),
+            )
+            runtime.run()
+            records = read_records(log_path)
+
+        self.assertEqual(len(records), 2)
+        vision_record, button_record = records
+        self.assertEqual(vision_record["schema_version"], "0.2")
+        self.assertIsNotNone(vision_record["observation"])
+        self.assertIsNone(vision_record["event"])
+        self.assertIsNone(button_record["observation"])
+        self.assertEqual(
+            button_record["event"], {"type": "BUTTON_PRESSED", "payload": None}
+        )
+        self.assertEqual([vision_record["cycle_id"], button_record["cycle_id"]], [1, 2])
+
+
 class MainTest(unittest.TestCase):
     def test_main_processes_stdin_and_returns_zero(self):
+        # main() は Phase 0.8 Dispatch path (DispatchingVisionSource) を使う。
+        # State Coalescing により raw DetectionEvent 数と RobotLoopRecord 数の
+        # 一致は要求しない (docs/specs/phase-0.8-implementation-plan.md
+        # #Regression Boundary)。「1件以上処理される」「最終的に最新の Vision
+        # State へ追従する」ことだけを確認する。
         stdin = io.StringIO(FIXTURE.read_text(encoding="utf-8"))
         stdout = io.StringIO()
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "nested" / "robot.jsonl"
             with mock.patch("sys.stdin", stdin), mock.patch("sys.stdout", stdout):
-                exit_code = main(["--log-path", str(log_path), "--log-level", "ERROR"])
+                exit_code = main(
+                    ["--log-path", str(log_path), "--log-level", "ERROR", "--hardware", "none"]
+                )
             records = read_records(log_path)
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(stdout.getvalue().splitlines(), EXPECTED_CONSOLE)
-        self.assertEqual(len(records), 4)
+        console_lines = stdout.getvalue().splitlines()
+        self.assertGreaterEqual(len(console_lines), 1)
+        self.assertEqual(console_lines[-1], EXPECTED_CONSOLE[-1])
+        self.assertGreaterEqual(len(records), 1)
+        self.assertEqual(records[-1]["decision"]["type"], "PERSON_DETECTED")
+        for record in records:
+            self.assertEqual(set(record), EXPECTED_KEYS)
+            self.assertEqual(record["schema_version"], "0.2")
 
     def test_main_returns_one_on_unexpected_runtime_error(self):
         stdin = io.StringIO(FIXTURE.read_text(encoding="utf-8"))
@@ -247,19 +357,84 @@ class MainTest(unittest.TestCase):
                 RuleBasedReasoner, "reason", side_effect=RuntimeError("boom")
             ):
                 with self.assertLogs("runtime.robot_runtime", level="ERROR") as logs:
-                    exit_code = main(["--log-path", str(log_path)])
+                    exit_code = main(["--log-path", str(log_path), "--hardware", "none"])
 
         self.assertEqual(exit_code, 1)
         self.assertIn("boom", "\n".join(logs.output))
 
 
+class MainWhisplayTest(unittest.TestCase):
+    """Milestone 6: main() の Whisplay 配線 (縮退運転 / ミラー出力 / cleanup)。"""
+
+    def _run_main(self, extra_args, stdout=None):
+        stdin = io.StringIO(FIXTURE.read_text(encoding="utf-8"))
+        stdout = stdout or io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "robot.jsonl"
+            with mock.patch("sys.stdin", stdin), mock.patch("sys.stdout", stdout):
+                exit_code = main(["--log-path", str(log_path), *extra_args])
+        return exit_code, stdout.getvalue().splitlines()
+
+    def test_auto_falls_back_to_console_when_whisplay_driver_is_missing(self):
+        # Raspberry Pi 上では本物の whisplay_client が sys.path から見え得るため、
+        # 隔離しないと実機の Whisplay を初期化してしまう (Milestone 10)。
+        from tests.runtime.test_whisplay_adapter import isolated_driver_import
+
+        with tempfile.TemporaryDirectory() as empty_dir, mock.patch.dict(
+            "os.environ", {"WHISPLAY_DRIVER_DIR": empty_dir}
+        ), isolated_driver_import():
+            with self.assertLogs("runtime.robot_runtime", level="WARNING") as logs:
+                exit_code, console = self._run_main(["--hardware", "auto"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(console[-1], EXPECTED_CONSOLE[-1])
+        self.assertIn("Whisplay unavailable", "\n".join(logs.output))
+
+    def test_auto_uses_whisplay_mirror_and_cleans_up(self):
+        adapter = FakeHardwareAdapter()
+        with mock.patch("runtime.robot_runtime._open_whisplay", return_value=adapter):
+            exit_code, console = self._run_main(["--hardware", "auto", "--log-level", "ERROR"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(console[-1], EXPECTED_CONSOLE[-1])
+        # Vision の結果が Display / LED へもミラーされる (AC-18)。
+        self.assertIn(("display", "Person detected"), adapter.calls)
+        self.assertIn(("set_led", "GREEN"), adapter.calls)
+        self.assertTrue(adapter.cleaned_up)
+
+    def test_whisplay_is_cleaned_up_even_when_runtime_fails(self):
+        adapter = FakeHardwareAdapter()
+        with mock.patch(
+            "runtime.robot_runtime._open_whisplay", return_value=adapter
+        ), mock.patch.object(
+            RuleBasedReasoner, "reason", side_effect=RuntimeError("boom")
+        ):
+            with self.assertLogs("runtime.robot_runtime", level="ERROR"):
+                exit_code, _ = self._run_main(["--hardware", "auto"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertTrue(adapter.cleaned_up)
+
+    def test_none_never_opens_whisplay(self):
+        with mock.patch("runtime.robot_runtime._open_whisplay") as opener:
+            exit_code, _ = self._run_main(["--hardware", "none", "--log-level", "ERROR"])
+
+        self.assertEqual(exit_code, 0)
+        opener.assert_not_called()
+
+
 class CliEndToEndTest(unittest.TestCase):
     def test_module_runs_with_stdin_redirect(self):
+        # Dispatch path (State Coalescing) のため件数一致は要求しない。
+        # MainTest.test_main_processes_stdin_and_returns_zero と同じ基準。
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "robot.jsonl"
             with FIXTURE.open("rb") as stdin:
                 proc = subprocess.run(
-                    [sys.executable, "-m", "runtime.robot_runtime", "--log-path", str(log_path)],
+                    [
+                        sys.executable, "-m", "runtime.robot_runtime",
+                        "--log-path", str(log_path), "--hardware", "none",
+                    ],
                     stdin=stdin,
                     capture_output=True,
                     text=True,
@@ -270,10 +445,13 @@ class CliEndToEndTest(unittest.TestCase):
             records = read_records(log_path)
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(proc.stdout.splitlines(), EXPECTED_CONSOLE)
+        console_lines = proc.stdout.splitlines()
+        self.assertGreaterEqual(len(console_lines), 1)
+        self.assertEqual(console_lines[-1], EXPECTED_CONSOLE[-1])
         self.assertIn("WARNING", proc.stderr)
         self.assertIn("Robot Runtime started", proc.stderr)
-        self.assertEqual(len(records), 4)
+        self.assertGreaterEqual(len(records), 1)
+        self.assertEqual(records[-1]["decision"]["type"], "PERSON_DETECTED")
 
 
 if __name__ == "__main__":

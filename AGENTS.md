@@ -67,7 +67,9 @@ Raspberry Pi向けのコマンドやコードは、可能な限りそのまま�
 
 現在の実機環境については以下を参照。
 
-`docs/progress/phase-0.5-progress.md`
+`docs/progress/phase-0.5-progress.md` (Raspberry Pi 5、AI HAT+ 2、Camera、Hailo YOLO)
+
+`docs/progress/phase-0.8-progress.md` (Whisplay HAT、hailo-apps venv、GenAI モデル)
 
 ### 4. Keep Architecture Boundaries
 
@@ -105,10 +107,30 @@ docs/development/  開発プロセス・運用ルール
 現在：
 
 ```text
-Phase 0.5 — Robot Runtime
+Phase 0.8 — Stationary AI Robot
+Implementation and real-device acceptance done (Milestone 0–11) / Implementation Review
 ```
 
-Observe → Reason → Action → Log の基本ループは実機動作確認済み。
+Phase 0.5 の Observe → Reason → Action → Log 基本ループは実機動作確認済み。
+
+Phase 0.8 の確定設計と実装計画：
+
+```text
+docs/specs/phase-0.8-stationary-ai-robot.md
+docs/specs/phase-0.8-implementation-plan.md
+```
+
+Phase 0.8 では Phase 0.5 の実機確認済み Runtime を基盤として、Whisplay HAT、Hardware Adapter、AI Job isolation、NPU resource management を追加した。実装・実機確認の結果、未確認事項、既知の制限は `docs/progress/phase-0.8-progress.md` を参照。Phase の完了判断は未了。
+
+Phase 0.8 の主な技術判断：
+
+```text
+docs/decisions/0009-merge-runtime-inputs-with-fifo-dispatch-and-state-coalescing.md
+docs/decisions/0010-run-hailo-ai-jobs-in-per-job-subprocess.md
+docs/decisions/0011-manage-npu-with-explicit-mode.md
+```
+
+継続中の Design Issue: #8 (Whisplay を AI HAT+ 2 上に積層した構成での LCD 表示の不安定)。
 
 Observeパイプライン（ソースとビルド手順は `edge/detection_logger/`）：
 
