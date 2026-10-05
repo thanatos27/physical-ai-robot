@@ -130,7 +130,7 @@ docs/decisions/0010-run-hailo-ai-jobs-in-per-job-subprocess.md
 docs/decisions/0011-manage-npu-with-explicit-mode.md
 ```
 
-継続中の Design Issue: #8 (Whisplay を AI HAT+ 2 上に積層した構成での LCD 表示の不安定)。
+Open の Design Issue: #8 (Whisplay LCD の表示の不安定)。Phase 0.8 では Known Limitation とし、LCD は補助的な HMI として本体機能と切り分ける。原因究明は打ち切り、`RealWhisplayAdapter` の回避策 (暫定 8 MHz + 再初期化) の撤去は別途判断する。
 
 Observeパイプライン（ソースとビルド手順は `edge/detection_logger/`）：
 

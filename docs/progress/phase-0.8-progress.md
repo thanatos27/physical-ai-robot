@@ -726,7 +726,7 @@ Rule Reason / Whisplay (Button、LCD) / Log が動作し、`exit=0` で終了し
 | AC-09 Event Ordering | 自動テスト + 実機 | 9.3、5.2 |
 | AC-10 Deterministic Rule | 自動テスト | 9.3 |
 | AC-11 AI-independent Core | 実機 OK | `--ai none` の各確認 |
-| AC-12 Whisplay Display | **条件付き** | 表示はできるが、積層構成でノイズや長時間稼働時の表示停止がある (10.1 / 10.2、Issue #8) |
+| AC-12 Whisplay Display | **条件付き (Known Limitation)** | 表示はできるが、積層構成でノイズや長時間稼働時の表示停止がある (10.1 / 10.2 / 10.7、Issue #8)。LCD は補助的な HMI とし、Phase 0.8 の完了をブロックしない |
 | AC-13 Whisplay LED | 実機 OK | 4.5、5.2 |
 | AC-14 Whisplay Button | 実機 OK | 4.5、5.2 |
 | AC-15 Whisplay Speaker | 実機 OK | 4.4 / 4.5 (Runtime の `PLAY_AUDIO` 経路は未使用) |
@@ -749,6 +749,53 @@ Rule Reason / Whisplay (Button、LCD) / Log が動作し、`exit=0` で終了し
 | AC-NPU-01〜04 | 実機 OK | 8.3 (Runtime 外の rpicam-hello は防げない制限あり) |
 | AC-JOB-01 | 自動テスト | 9.3 |
 | AC-EXT-01〜04 | 実機 OK | 6.3、6.6 (STT の精度に課題) |
+
+### 10.7 Issue #8 の再評価と Known Limitation への変更 (2026-10-05)
+
+Issue #8 の追加判断 (ハードウェア側の改善後に SPI clock を再評価する) に沿って再評価した。
+
+**GPIO stacking header の差し替え後 (積層あり):**
+
+* 10.1 と同じベンチを6回実施。1回目は 8 / 16 / 32 MHz とも表示されず (バックライトのみ)、
+  速度ごとに LCD を初期化し直しても戻らなかった。2〜6回目のノイズ発生は 8 MHz 1/5、
+  16 MHz 2/5、32 MHz 1/5 で、差し替え前 (10.1) とはっきりした違いは無く、速度による差も
+  見られなかった
+* 32 MHz で 30 分連続稼働し、約 7 分後に表示が止まった (バックライトの点滅のみ)。
+  Runtime / rpicam-hello のエラーは 0 件。終了後に LCD を初期化し直すと復帰した
+
+**積層なし (AI HAT+ 2 を外し、Whisplay を Pi 5 に直挿し):**
+
+* Runtime (32 MHz) では、起動直後から表示が 180° 反転した。AI HAT+ 2 が無いため判断は
+  30 分間 `NO_PERSON` のままで描画は起動時の1回だけだったので、反転は初期化か最初の
+  描画の時点で起きた
+* 同じ直挿し構成で、PiSugar 公式 `example/test.py` は安定して動作し、表示の向きも正常だった
+
+**解釈:** 単一の原因には断定できない。AI HAT+ 2 を挟んだ積層経路は LCD 不安定化の大きな
+要因である可能性が高い。一方、直挿しでの反転は公式サンプルでは起きず Runtime だけで
+起きたため、Runtime 固有の処理 (`_configure_spi()` による SPI clock の変更と、PiSugar の
+非公開 API での LCD 再初期化) が関与している可能性がある。
+
+なお、Claude Code は当初、直挿しでの反転を根拠に「積層だけが原因ではない可能性が高い」と
+Issue #8 に記録したが、公式サンプルを同じ構成で試していない段階の判断で、踏み込みすぎ
+だった。
+
+**決定 (Issue #8):**
+
+* Phase 0.8 では LCD の原因究明を打ち切り、LCD の不安定さを Known Limitation とする
+* Whisplay LCD は補助的な HMI として扱い、Runtime / Vision / NPU / AI Job 等の本体機能と
+  切り分ける。Phase 0.8 の完了をこの問題だけでブロックしない
+* 将来、筐体 / HMI / Hardware 構成を本格化する段階で、別 Display や接続方式も含めて
+  再検討する
+* Issue #8 の対策として追加した「暫定 8 MHz + 非公開 API による LCD 再初期化」は、問題を
+  解消できず、直挿し時の反転に関与している可能性もある。撤去して PiSugar 公式 driver の
+  標準動作へ戻すかは別途判断する (それまでコードは変更しない)
+* Issue #8 は Close せず、Phase 0.8 でどこまで受け入れ、どの状態で終えるかを整理する
+
+**付記 (LCD とは別の問題):** AI HAT+ 2 が無い状態でも、rpicam-hello は stderr に
+`HailoRT not ready` 等を出しながら (54,015 行) `detections: []` を出し続け、Runtime は
+30 分間 `NO_PERSON` として処理した。ADR 0008 / 0011 の制限 (正常な検出0件と推論失敗を
+区別できない) が実際に現れた事実で、Vision の推論状態の問題として、Phase 1 以降の課題
+(11.7) として扱う。
 
 ## 11. Phase 0.8 の整理 (Milestone 12)
 
@@ -780,7 +827,8 @@ Software:
 * ADR 0009: FIFO Dispatch + State Coalescing、回帰の境界 (legacy path / Dispatch path)
 * ADR 0010: AI Job を per-job subprocess で実行 (Phase 0.8 の暫定方式)
 * ADR 0011: NPU を明示的なモードで管理 (`--npu-mode`)
-* 継続中: Design Issue #8 (Whisplay 積層時の LCD 表示)
+* Design Issue #8 (Whisplay LCD の表示): Phase 0.8 では Known Limitation とし、原因究明を
+  打ち切る (10.7)。Issue は Close せず、回避策の撤去は別途判断
 
 ### 11.3 結果のまとめ
 
@@ -790,8 +838,11 @@ Software:
 
 ### 11.4 既知の制限
 
-* 積層構成で LCD にノイズが出ることがあり、長時間稼働で表示が止まることがある (10.1 /
-  10.2、Issue #8)。LCD を初期化し直すと復帰する
+* Whisplay LCD の表示が不安定 (Issue #8、10.1 / 10.2 / 10.7)。積層構成ではノイズや長時間
+  稼働での表示停止があり、GPIO stacking header の差し替えでも、SPI clock (8 / 16 / 32 MHz)
+  を変えても解消しなかった。初期化し直すと復帰することが多いが、必ずではない。直挿し構成
+  では Runtime でのみ表示が 180° 反転した。LCD は補助的な HMI として扱い、本体機能
+  (Runtime / Vision / NPU / AI Job) とは切り分ける
 * YOLO (rpicam-apps) と VLM は NPU を同時に使えない。`--npu-mode` で明示的に切り替える。
   Runtime の外で起動された `rpicam-hello` は防げず、AI の実行中に Vision を起動すると
   検出0件を出し続ける (7.4、ADR 0011)
@@ -813,13 +864,17 @@ Software:
 * Button を押してから処理されるまでの遅れそのもの (10.3)
 * vision モードの確認時に Vision の処理件数が少なかった理由 (8.4)
 * 処理件数の減少と LCD 描画時間の関係 (6.8 の訂正)
-* LCD の SPI clock の最終値と、ハードウェア改善後の長時間稼働 (Issue #8)
+* LCD 不安定の原因 (積層経路、Runtime 固有の SPI clock 変更と再初期化の関与。Issue #8 で
+  究明を打ち切った)
+* 積層構成での PiSugar 公式 `test.py` の長時間稼働 (Runtime の処理と切り分ける比較)
 * 30 分を超える連続稼働
 
 ### 11.6 Technical Debt
 
 * `RealWhisplayAdapter` は PiSugar の非公開メソッド (`_reset_lcd` / `_init_display`) に
-  依存し、ドライバの場所を `sys.path` に追加したまま戻さない
+  依存し、ドライバの場所を `sys.path` に追加したまま戻さない。この再初期化 (暫定 8 MHz) は
+  Issue #8 を解消できず、直挿し時の反転に関与している可能性もあるため、撤去して PiSugar
+  公式 driver の標準動作へ戻すかを別途判断する (10.7)
 * PiSugar Whisplay driver の clone は特定の commit を記録していない (2026-10-01 時点の
   `--depth 1`)。hailo-apps は tag 26.03.1 を使用
 * `hailo-download-resources` は Model Zoo のバージョンを v5.1.0 と解決するため、v5.1.1 の
@@ -836,18 +891,19 @@ Software:
   状態を判定できる信号が要る (ADR 0011)
 * 判定の安定化: 1〜2 フレームの検出0件による判定のちらつき (Phase 0.5 15.4)。LCD の
   描画量 (10.2) にも影響している
-* ハードウェアの積層 / 固定の改善 (Issue #8)。Motor 等を追加する前に物理構成を安定させる
+* Vision の推論失敗の検出: AI HAT+ 2 が無くても Runtime は 30 分間 `NO_PERSON` として
+  処理した (10.7 付記)。上の NPU mode management の前提 (推論状態の信号) と同じ課題
+* 筐体 / HMI / Hardware 構成: 別 Display や接続方式を含めた LCD の再検討 (Issue #8)。
+  Motor 等を追加する前に物理構成を安定させる
 * Motor 等の物理 Actuator を扱う際の安全要件 (Emergency Stop、Watchdog 等)
 * AI Result の内容を Reason で使うこと、STT の組み込み、日本語での認識
 
 ## 12. 次の課題
 
 * Implementation PR (`implementation/phase-0.8` → `main`) の Implementation Review (Codex)
-* Design Issue #8: ハードウェア側の積層 / 固定の改善と、改善後の 8 / 16 / 32 MHz の
-  再評価 (長時間稼働での表示停止の有無を含む)。ソフトウェア側の LCD 高頻度更新の抑制の
-  検討
+* Design Issue #8: Phase 0.8 でどこまで受け入れ、どの状態で終えるかの整理。
+  `RealWhisplayAdapter` の回避策 (暫定 8 MHz + 再初期化) を撤去するかの判断
 * Phase 0.8 の完了判断 (設計側)
-  (Design Issue #8) を含む
 * Vision の推論状態を判定する信号 (ADR 0008 の将来課題) と NPU mode management の
   自動切替 (Design Issue #9 で将来課題とした)
 * 5.3 の Button 表示が Vision に上書きされる挙動は、Button に対する UX を

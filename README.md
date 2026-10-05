@@ -42,7 +42,7 @@ AI Result (Hailo VLM, per-job) ─────┘        Observation / Event →
 
 * 実機で確認済み: Vision E2E、Button E2E、Whisplay の各 I/O、Button → VLM → AI Result の記録、NPU の調停、30 分連続稼働での温度、オフライン動作
 * 自動テスト: 開発 PC と Raspberry Pi で 136 件パス
-* 既知の課題: AI HAT+ 2 上に Whisplay を積層した構成で LCD 表示が不安定になる (ノイズ、長時間稼働での表示停止)。Issue #8 でハードウェア側の改善を検討中
+* Known Limitation: Whisplay LCD の表示が不安定 (積層構成でのノイズ、長時間稼働での表示停止など)。Phase 0.8 では LCD を補助的な HMI とし、原因究明を打ち切った (Issue #8)
 * YOLO と VLM は NPU を同時に使えないため、`--npu-mode` で明示的に切り替える (ADR 0011)
 
 詳細な進捗・実機確認結果・未確認事項：
@@ -108,7 +108,7 @@ python3 -m runtime.robot_runtime --ai vlm --npu-mode ai
 | 環境変数 | 既定 | 内容 |
 |---|---|---|
 | `WHISPLAY_DRIVER_DIR` | `~/Whisplay/runtime` | PiSugar Whisplay driver (`whisplay_client.py`) の場所 |
-| `WHISPLAY_SPI_HZ` | `8000000` | LCD の SPI clock (暫定。Issue #8 で再評価中) |
+| `WHISPLAY_SPI_HZ` | `8000000` | LCD の SPI clock (暫定。この設定と LCD の再初期化を撤去するかは Issue #8 で別途判断) |
 | `HAILO_GENAI_PYTHON` | `~/venvs/hailo-apps/bin/python` | VLM worker を実行する Python |
 | `VLM_HEF_PATH` | `/usr/local/hailo/resources/models/hailo10h/Qwen2-VL-2B-Instruct.hef` | VLM のモデル |
 
