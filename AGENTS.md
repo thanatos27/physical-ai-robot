@@ -108,7 +108,7 @@ docs/development/  開発プロセス・運用ルール
 
 ```text
 Phase 0.8 — Stationary AI Robot
-Implementation and real-device acceptance done (Milestone 0–11) / Implementation Review
+Implementation and real-device acceptance done (Milestone 0–11) / Implementation PR #10 merged / Phase completion pending
 ```
 
 Phase 0.5 の Observe → Reason → Action → Log 基本ループは実機動作確認済み。

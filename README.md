@@ -38,7 +38,7 @@ AI Result (Hailo VLM, per-job) ─────┘        Observation / Event →
                                               Whisplay LCD / LED、Robot Event Log
 ```
 
-実装と実機での受け入れ確認 (Milestone 0〜11) を終え、Implementation Review の段階にある。Phase の完了判断は未了。
+実装と実機での受け入れ確認 (Milestone 0〜11) を終え、Implementation PR (#10) は Implementation Review を経て `main` にマージ済み。Phase の完了判断は未了。
 
 * 実機で確認済み: Vision E2E、Button E2E、Whisplay の各 I/O、Button → VLM → AI Result の記録、NPU の調停、30 分連続稼働での温度、オフライン動作
 * 自動テスト: 開発 PC と Raspberry Pi で 136 件パス

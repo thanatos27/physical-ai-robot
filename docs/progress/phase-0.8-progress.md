@@ -900,7 +900,6 @@ Software:
 
 ## 12. 次の課題
 
-* Implementation PR (`implementation/phase-0.8` → `main`) の Implementation Review (Codex)
 * Design Issue #8: Phase 0.8 でどこまで受け入れ、どの状態で終えるかの整理。
   `RealWhisplayAdapter` の回避策 (暫定 8 MHz + 再初期化) を撤去するかの判断
 * Phase 0.8 の完了判断 (設計側)
