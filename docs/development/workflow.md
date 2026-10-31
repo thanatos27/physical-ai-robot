@@ -56,7 +56,7 @@ ChatGPT Project は、プロジェクト全体の設計・技術判断を担当�
 - Phase の Goal / Scope の整理
 - アーキテクチャ設計
 - コンポーネント責務の整理
-- ハードウェア構成の検討
+- ハードウェア構成の検討（購入前の選定ゲートは `docs/development/hardware-selection.md`）
 - 技術選定
 - 実機結果の分析
 - 技術課題の整理
@@ -138,6 +138,9 @@ docs/progress/
 
 docs/development/
     プロジェクト共通の開発プロセス・運用ルール
+
+docs/hardware/
+    検討中・保留・不採用を含むハードウェア選定と調達の記録
 ```
 
 基本原則:

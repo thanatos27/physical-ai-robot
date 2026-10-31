@@ -87,6 +87,10 @@ Log
 
 将来センサー、モーター、SLAM、AI Agent等が追加されても、この境界を不用意に結合しない。
 
+### 5. Hardware Selection and Procurement
+
+ハードウェア選定・採用・購入提案には `docs/development/hardware-selection.md` の購入前ゲートを必ず適用する。
+
 ## Documentation
 
 ドキュメントの役割と更新タイミングは `docs/development/workflow.md` に従う。
@@ -98,6 +102,7 @@ docs/specs/        これから作るもの
 docs/decisions/    なぜそうしたか
 docs/progress/     実際にできたもの
 docs/development/  開発プロセス・運用ルール
+docs/hardware/     ハードウェア候補の選定・調達・保留記録
 ```
 
 重要な技術判断はADRとして記録し、未実装・未確認の内容を完了済みのprogressとして記録しない。
