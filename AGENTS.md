@@ -50,16 +50,6 @@ AI Agentは実装開始前に、対象Phase・機能のSpecification、ADR、Acc
 
 変更が必要な場合は、変更理由、期待するメリット、既存構成への影響、検証方法を明確にする。
 
-### Hardware Selection and Procurement
-
-ハードウェアの選定・採用・購入提案では、`docs/development/hardware-selection.md` の購入前ゲートを必ず適用する。
-
-- 物理・電気・ソフトウェアの成立性を先に確認し、致命的な未解決リスクがある候補は採用・購入を保留する
-- 本体に加えて必要なネジ、スペーサー、ケーブル、電池等の調達可能性を確認する
-- 販売元、在庫、納期、本体・追加部品・送料・税等の総額を確認日付きで記録する
-- 実機確認済み、公式仕様確認済み、推定、未確認を区別する
-- 構成全体の採用判定ができるまで、下流の部品選定を確定事項として進めない
-
 ### 2. Prefer Evidence Over Assumptions
 
 ハードウェア・OS・ドライバ・ライブラリ等について、以下の順に優先する。
@@ -97,6 +87,10 @@ Log
 
 将来センサー、モーター、SLAM、AI Agent等が追加されても、この境界を不用意に結合しない。
 
+### 5. Hardware Selection and Procurement
+
+ハードウェア選定・採用・購入提案には `docs/development/hardware-selection.md` の購入前ゲートを必ず適用する。
+
 ## Documentation
 
 ドキュメントの役割と更新タイミングは `docs/development/workflow.md` に従う。
@@ -108,6 +102,7 @@ docs/specs/        これから作るもの
 docs/decisions/    なぜそうしたか
 docs/progress/     実際にできたもの
 docs/development/  開発プロセス・運用ルール
+docs/hardware/     ハードウェア候補の選定・調達・保留記録
 ```
 
 重要な技術判断はADRとして記録し、未実装・未確認の内容を完了済みのprogressとして記録しない。
